@@ -14,6 +14,13 @@ func (r *Resolver) usingUDP() (yes bool) {
 	return
 }
 
+func (r *Resolver) usingIPv6() (yes bool) {
+	r.mu.RLock()
+	yes = r.useIPv6
+	r.mu.RUnlock()
+	return
+}
+
 func (r *Resolver) maybeDisableIPv6(err error) (disabled bool) {
 	if err != nil {
 		errstr := err.Error()

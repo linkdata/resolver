@@ -46,14 +46,14 @@ type Result struct {
 }
 
 type Resolver struct {
-	roots []string // "ip:port" of root servers
 	proxy.ContextDialer
 	Timeout     time.Duration
+	DNSPort     uint16
 	maxChase    int // max CNAME/DNAME chase depth
 	negMu       sync.RWMutex
 	neg         map[negKey]negEntry
 	addrMu      sync.RWMutex
-	addrCache   map[string][]string
+	addrCache   map[string][]netip.Addr
 	mu          sync.RWMutex // protects following
 	useIPv4     bool
 	useIPv6     bool
@@ -73,27 +73,20 @@ type negEntry struct {
 
 // New returns a resolver seeded with IANA root servers.
 func New() (r *Resolver) {
-	roots := make([]string, 0, len(Roots4)+len(Roots6))
-	rootAddrs := make([]netip.Addr, 0, len(Roots4)+len(Roots6))
-	for _, addr := range Roots4 {
-		roots = append(roots, net.JoinHostPort(addr.String(), "53"))
-		rootAddrs = append(rootAddrs, addr)
-	}
-	for _, addr := range Roots6 {
-		roots = append(roots, net.JoinHostPort(addr.String(), "53"))
-		rootAddrs = append(rootAddrs, addr)
-	}
+	var roots []netip.Addr
+	roots = append(roots, Roots4...)
+	roots = append(roots, Roots6...)
 	return &Resolver{
-		roots:         roots,
 		ContextDialer: &net.Dialer{},
 		Timeout:       3 * time.Second,
+		DNSPort:       53,
 		maxChase:      8,
 		neg:           make(map[negKey]negEntry),
-		addrCache:     make(map[string][]string),
+		addrCache:     make(map[string][]netip.Addr),
 		useIPv4:       len(Roots4) > 0,
 		useIPv6:       len(Roots6) > 0,
 		useUDP:        true,
-		rootServers:   rootAddrs,
+		rootServers:   roots,
 	}
 }
 
@@ -111,7 +104,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 		return &Result{RCODE: int(dns.RcodeNameError), Authority: []dns.RR{e.soa}}, nil
 	}
 
-	servers := append([]string(nil), r.roots...)
+	servers := append([]netip.Addr(nil), r.rootServers...)
 	labels := dns.SplitDomainName(qname)
 
 	// Walk down: "." -> "com." -> "example.com."
@@ -128,7 +121,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 			if len(targetServers) == 0 {
 				targetServers = servers
 			}
-			return r.queryFinal(ctx, qname, qtype, targetServers, servers, depth, resp)
+			return r.queryFinal(ctx, qname, qtype, targetServers, depth, resp)
 		}
 
 		if len(nsSet) == 0 {
@@ -136,13 +129,13 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 				if zone == qname {
 					return r.handleTerminal(zone, resp)
 				}
-				return r.queryFinal(ctx, qname, qtype, servers, servers, depth, resp)
+				return r.queryFinal(ctx, qname, qtype, servers, depth, resp)
 			}
 			continue
 		}
 		servers = nextSrv
 	}
-	return r.queryFinal(ctx, qname, qtype, servers, servers, depth, nil)
+	return r.queryFinal(ctx, qname, qtype, servers, depth, nil)
 }
 
 // -------- Core steps ---------
@@ -150,7 +143,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 // queryForDelegation performs the QMIN step at `zone` against `parentServers`.
 // If servers REFUSE/NOTIMP the minimized NS query, retry with non-QMIN (ask NS for the full qname).
 // Returns: (nsOwnerNames, resolvedServerAddrs, lastResponse, error)
-func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentServers []string, fullQname string) ([]string, []string, *dns.Msg, error) {
+func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentServers []netip.Addr, fullQname string) ([]string, []netip.Addr, *dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(zone, dns.TypeNS)
 	m.RecursionDesired = false
@@ -236,7 +229,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 
 // queryFinal asks the authoritative (or closest) servers for the target qname/qtype.
 // It also performs CNAME/DNAME chasing, with a loop bound controlled by depth.
-func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []string, fallbackParent []string, depth int, parentResp *dns.Msg) (*Result, error) {
+func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []netip.Addr, depth int, parentResp *dns.Msg) (*Result, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
 	m.RecursionDesired = false
@@ -254,7 +247,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 		case dns.RcodeSuccess:
 			// If we got the desired RRset, return it directly.
 			if hasRRType(resp.Answer, qtype) {
-				return &Result{Answers: resp.Answer, Authority: resp.Ns, Additional: resp.Extra, Server: svr, RCODE: resp.Rcode}, nil
+				return &Result{Answers: resp.Answer, Authority: resp.Ns, Additional: resp.Extra, Server: addrPort(svr), RCODE: resp.Rcode}, nil
 			}
 
 			// CNAME chase: if owner has CNAME, follow it.
@@ -296,7 +289,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 			// NODATA? If SOA present, negative-cache and return.
 			if soa := extractSOA(resp); soa != nil {
 				r.negPut(qname, qtype, soa)
-				return &Result{Answers: nil, Authority: []dns.RR{soa}, Additional: resp.Extra, Server: svr, RCODE: resp.Rcode}, nil
+				return &Result{Answers: nil, Authority: []dns.RR{soa}, Additional: resp.Extra, Server: addrPort(svr), RCODE: resp.Rcode}, nil
 			}
 
 			// Otherwise, try next server.
@@ -304,7 +297,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 			if soa := extractSOA(resp); soa != nil {
 				r.negPut(qname, qtype, soa)
 			}
-			return &Result{Answers: nil, Authority: resp.Ns, Additional: resp.Extra, Server: svr, RCODE: resp.Rcode}, nil
+			return &Result{Answers: nil, Authority: resp.Ns, Additional: resp.Extra, Server: addrPort(svr), RCODE: resp.Rcode}, nil
 		}
 	}
 
@@ -340,21 +333,25 @@ func (r *Resolver) handleTerminal(zone string, resp *dns.Msg) (*Result, error) {
 
 // -------- Transport & helpers ---------
 
-func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server string) (resp *dns.Msg, err error) {
-	if r.usingUDP() {
-		if resp, err = r.exchangeWithNetwork(ctx, "udp", m, server); err != nil {
-			if r.maybeDisableUdp(err) {
-				err = nil
+func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server netip.Addr) (resp *dns.Msg, err error) {
+	err = net.ErrClosed
+	if server.Is4() || r.usingIPv6() {
+		err = nil
+		if r.usingUDP() {
+			if resp, err = r.exchangeWithNetwork(ctx, "udp", m, server); err != nil {
+				if r.maybeDisableUdp(err) {
+					err = nil
+				}
 			}
 		}
-	}
-	if err == nil && (resp == nil || resp.Truncated) {
-		resp, err = r.exchangeWithNetwork(ctx, "tcp", m, server)
+		if err == nil && (resp == nil || resp.Truncated) {
+			resp, err = r.exchangeWithNetwork(ctx, "tcp", m, server)
+		}
 	}
 	return
 }
 
-func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *dns.Msg, server string) (resp *dns.Msg, err error) {
+func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *dns.Msg, server netip.Addr) (resp *dns.Msg, err error) {
 	var dnsConn *dns.Conn
 	if dnsConn, err = r.dialDNSConn(ctx, network, server); err == nil {
 		defer dnsConn.Close()
@@ -369,15 +366,21 @@ func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *d
 	return
 }
 
-func (r *Resolver) dialDNSConn(ctx context.Context, network, server string) (dnsConn *dns.Conn, err error) {
+func (r *Resolver) dialDNSConn(ctx context.Context, network string, server netip.Addr) (dnsConn *dns.Conn, err error) {
 	var rawConn net.Conn
-	if rawConn, err = r.DialContext(ctx, network, server); err == nil {
+	if rawConn, err = r.DialContext(ctx, network, addrPort(server)); err == nil {
 		dnsConn = &dns.Conn{Conn: rawConn}
 		if strings.HasPrefix(network, "udp") {
 			dnsConn.UDPSize = dns.DefaultMsgSize
 		}
+	} else if server.Is6() {
+		r.maybeDisableIPv6(err)
 	}
 	return
+}
+
+func addrPort(addr netip.Addr) string {
+	return netip.AddrPortFrom(addr, 53).String()
 }
 
 func (r *Resolver) deadline(ctx context.Context) time.Time {
@@ -444,17 +447,21 @@ func delegationRecords(m *dns.Msg, zone string) []dns.RR {
 	return out
 }
 
-func glueAddresses(m *dns.Msg) []string {
-	var addrs []string
+func glueAddresses(m *dns.Msg) []netip.Addr {
+	var addrs []netip.Addr
 	for _, rr := range m.Extra {
 		switch a := rr.(type) {
 		case *dns.A:
-			addrs = append(addrs, net.JoinHostPort(a.A.String(), "53"))
+			if addr, ok := ipToAddr(a.A); ok {
+				addrs = append(addrs, addr)
+			}
 		case *dns.AAAA:
-			addrs = append(addrs, net.JoinHostPort(a.AAAA.String(), "53"))
+			if addr, ok := ipToAddr(a.AAAA); ok {
+				addrs = append(addrs, addr)
+			}
 		}
 	}
-	return addrs
+	return dedupAddrs(addrs)
 }
 
 func extractSOA(m *dns.Msg) *dns.SOA {
@@ -496,8 +503,8 @@ func dnameRecords(rrs []dns.RR, qname string) []dns.RR {
 }
 
 // resolveNSAddrs minimally resolves NS owner names to addresses by asking the roots → ...
-func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string) []string {
-	var addrs []string
+func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string) []netip.Addr {
+	var addrs []netip.Addr
 	for _, host := range nsOwners {
 		r.addrMu.RLock()
 		cached, ok := r.addrCache[host]
@@ -505,13 +512,15 @@ func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string) []stri
 		if ok {
 			addrs = append(addrs, cached...)
 		} else {
-			var resolved []string
+			var resolved []netip.Addr
 			haveIPv4 := false
 			if res, err := r.Resolve(ctx, host, dns.TypeA); err == nil {
 				for _, rr := range res.Answers {
 					if a, ok := rr.(*dns.A); ok {
-						resolved = append(resolved, net.JoinHostPort(a.A.String(), "53"))
-						haveIPv4 = true
+						if addr, ok := ipToAddr(a.A); ok {
+							resolved = append(resolved, addr)
+							haveIPv4 = true
+						}
 					}
 				}
 			}
@@ -519,12 +528,14 @@ func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string) []stri
 				if res, err := r.Resolve(ctx, host, dns.TypeAAAA); err == nil {
 					for _, rr := range res.Answers {
 						if a, ok := rr.(*dns.AAAA); ok {
-							resolved = append(resolved, net.JoinHostPort(a.AAAA.String(), "53"))
+							if addr, ok := ipToAddr(a.AAAA); ok {
+								resolved = append(resolved, addr)
+							}
 						}
 					}
 				}
 			}
-			resolved = dedup(resolved)
+			resolved = dedupAddrs(resolved)
 			if len(resolved) > 0 {
 				r.addrMu.Lock()
 				r.addrCache[host] = resolved
@@ -533,19 +544,36 @@ func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string) []stri
 			}
 		}
 	}
-	return dedup(addrs)
+	return dedupAddrs(addrs)
 }
 
-func dedup(ss []string) []string {
-	seen := map[string]struct{}{}
-	var out []string
-	for _, s := range ss {
-		if _, ok := seen[s]; !ok {
-			seen[s] = struct{}{}
-			out = append(out, s)
+func dedupAddrs(addrs []netip.Addr) []netip.Addr {
+	seen := map[netip.Addr]struct{}{}
+	var out []netip.Addr
+	for _, addr := range addrs {
+		if _, ok := seen[addr]; !ok {
+			seen[addr] = struct{}{}
+			out = append(out, addr)
 		}
 	}
 	return out
+}
+
+func ipToAddr(ip net.IP) (netip.Addr, bool) {
+	if ip == nil {
+		return netip.Addr{}, false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		var arr [4]byte
+		copy(arr[:], v4)
+		return netip.AddrFrom4(arr), true
+	}
+	if v6 := ip.To16(); v6 != nil {
+		var arr [16]byte
+		copy(arr[:], v6)
+		return netip.AddrFrom16(arr), true
+	}
+	return netip.Addr{}, false
 }
 
 // -------- CNAME/DNAME helpers ---------
