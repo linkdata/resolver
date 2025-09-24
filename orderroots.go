@@ -9,8 +9,6 @@ import (
 )
 
 // OrderRoots sorts the root server list by their current latency and removes those that don't respond.
-//
-// If ctx does not have a deadline, DefaultTimeout will be used.
 func (r *Resolver) OrderRoots(ctx context.Context) {
 	if _, ok := ctx.Deadline(); !ok {
 		newctx, cancel := context.WithTimeout(ctx, r.Timeout)
