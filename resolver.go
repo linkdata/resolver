@@ -42,11 +42,13 @@ type Result struct {
 }
 
 type Resolver struct {
-	roots    []string // "ip:port" of root servers
-	Timeout  time.Duration
-	negMu    sync.RWMutex
-	neg      map[negKey]negEntry
-	maxChase int // max CNAME/DNAME chase depth
+	roots     []string // "ip:port" of root servers
+	Timeout   time.Duration
+	negMu     sync.RWMutex
+	neg       map[negKey]negEntry
+	maxChase  int // max CNAME/DNAME chase depth
+	addrMu    sync.RWMutex
+	addrCache map[string][]string
 }
 
 type negKey struct {
@@ -77,9 +79,10 @@ func New() *Resolver {
 			"199.7.83.42:53",    // l
 			"202.12.27.33:53",   // m
 		},
-		Timeout:  3 * time.Second,
-		neg:      make(map[negKey]negEntry),
-		maxChase: 8,
+		Timeout:   3 * time.Second,
+		neg:       make(map[negKey]negEntry),
+		maxChase:  8,
+		addrCache: make(map[string][]string),
 	}
 }
 
@@ -102,12 +105,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 
 	// Walk down: "." -> "com." -> "example.com."
 	for i := len(labels) - 2; i >= 0; i-- {
-		zone := strings.Join(labels[i:], ".")
-		if zone == "" {
-			zone = "."
-		} else if zone[0] != '.' {
-			zone += "."
-		}
+		zone := ensureFQDN(strings.Join(labels[i:], "."))
 
 		nsSet, nextSrv, resp, err := r.queryForDelegation(ctx, zone, servers, qname)
 		if err != nil {
@@ -115,11 +113,21 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 		}
 
 		if zone == qname {
-			return r.queryFinal(ctx, qname, qtype, nextSrv, servers, depth)
+			targetServers := nextSrv
+			if len(targetServers) == 0 {
+				targetServers = servers
+			}
+			return r.queryFinal(ctx, qname, qtype, targetServers, servers, depth)
 		}
 
 		if len(nsSet) == 0 {
-			return r.handleTerminal(zone, resp)
+			if resp != nil && resp.Rcode == dns.RcodeNameError {
+				if zone == qname {
+					return r.handleTerminal(zone, resp)
+				}
+				return r.queryFinal(ctx, qname, qtype, servers, servers, depth)
+			}
+			continue
 		}
 		servers = nextSrv
 	}
@@ -134,6 +142,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentServers []string, fullQname string) ([]string, []string, *dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(zone, dns.TypeNS)
+	m.RecursionDesired = false
 	setEDNS(m)
 
 	var last *dns.Msg
@@ -156,9 +165,17 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 			return nil, nil, resp, nil
 		}
 
-		nsOwners := extractNS(resp)
+		nsOwners := extractDelegationNS(resp, zone)
 		if len(nsOwners) == 0 {
-			return nil, nil, resp, nil
+			if resp != nil {
+				if resp.Rcode == dns.RcodeNameError {
+					if soa := extractSOA(resp); soa != nil {
+						r.negPut(zone, dns.TypeNS, soa)
+					}
+					return nil, nil, resp, nil
+				}
+			}
+			continue
 		}
 		addrs := glueAddresses(resp)
 		if len(addrs) == 0 {
@@ -172,6 +189,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 	if refusedSeen {
 		m2 := new(dns.Msg)
 		m2.SetQuestion(fullQname, dns.TypeNS) // ask NS for the full name (non-minimized)
+		m2.RecursionDesired = false
 		setEDNS(m2)
 		for _, svr := range shuffle(parentServers) {
 			resp, err := r.exchange(ctx, m2, svr)
@@ -185,7 +203,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 				}
 				return nil, nil, resp, nil
 			}
-			nsOwners := extractNS(resp)
+			nsOwners := extractDelegationNS(resp, fullQname)
 			if len(nsOwners) == 0 {
 				continue
 			}
@@ -210,6 +228,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []string, fallbackParent []string, depth int) (*Result, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
+	m.RecursionDesired = false
 	setEDNS(m)
 
 	var last *dns.Msg
@@ -337,6 +356,18 @@ func extractNS(m *dns.Msg) []string {
 	return out
 }
 
+func extractDelegationNS(m *dns.Msg, zone string) []string {
+	var out []string
+	for _, rr := range m.Ns {
+		if ns, ok := rr.(*dns.NS); ok {
+			if strings.EqualFold(ns.Hdr.Name, zone) {
+				out = append(out, strings.ToLower(ns.Ns))
+			}
+		}
+	}
+	return out
+}
+
 func glueAddresses(m *dns.Msg) []string {
 	var addrs []string
 	for _, rr := range m.Extra {
@@ -363,18 +394,37 @@ func extractSOA(m *dns.Msg) *dns.SOA {
 func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string) []string {
 	var addrs []string
 	for _, host := range nsOwners {
-		if res, err := r.Resolve(ctx, host, dns.TypeA); err == nil {
-			for _, rr := range res.Answers {
-				if a, ok := rr.(*dns.A); ok {
-					addrs = append(addrs, net.JoinHostPort(a.A.String(), "53"))
+		r.addrMu.RLock()
+		cached, ok := r.addrCache[host]
+		r.addrMu.RUnlock()
+		if ok {
+			addrs = append(addrs, cached...)
+		} else {
+			var resolved []string
+			haveIPv4 := false
+			if res, err := r.Resolve(ctx, host, dns.TypeA); err == nil {
+				for _, rr := range res.Answers {
+					if a, ok := rr.(*dns.A); ok {
+						resolved = append(resolved, net.JoinHostPort(a.A.String(), "53"))
+						haveIPv4 = true
+					}
 				}
 			}
-		}
-		if res, err := r.Resolve(ctx, host, dns.TypeAAAA); err == nil {
-			for _, rr := range res.Answers {
-				if a, ok := rr.(*dns.AAAA); ok {
-					addrs = append(addrs, net.JoinHostPort(a.AAAA.String(), "53"))
+			if !haveIPv4 {
+				if res, err := r.Resolve(ctx, host, dns.TypeAAAA); err == nil {
+					for _, rr := range res.Answers {
+						if a, ok := rr.(*dns.AAAA); ok {
+							resolved = append(resolved, net.JoinHostPort(a.AAAA.String(), "53"))
+						}
+					}
 				}
+			}
+			resolved = dedup(resolved)
+			if len(resolved) > 0 {
+				r.addrMu.Lock()
+				r.addrCache[host] = resolved
+				r.addrMu.Unlock()
+				addrs = append(addrs, resolved...)
 			}
 		}
 	}
