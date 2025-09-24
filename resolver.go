@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -83,15 +84,18 @@ func New() (r *Resolver) {
 
 // Resolve performs iterative resolution with QNAME minimization for qname/qtype.
 func (r *Resolver) Resolve(ctx context.Context, qname string, qtype uint16, logw io.Writer) (*dns.Msg, netip.Addr, error) {
+	logf(logw, "resolve start qname=%s qtype=%s", qname, typeName(qtype))
 	return r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(qname)), qtype, 0, logw)
 }
 
 // resolveWithDepth is Resolve plus a chase-depth counter to avoid infinite loops.
 func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uint16, depth int, logw io.Writer) (*dns.Msg, netip.Addr, error) {
+	logf(logw, "depth=%d qname=%s qtype=%s", depth, qname, typeName(qtype))
 	if depth > r.maxChase {
 		return nil, netip.Addr{}, fmt.Errorf("cname/dname chain too deep (> %d)", r.maxChase)
 	}
 	if e := r.negGet(qname, qtype); e != nil {
+		logf(logw, "negcache hit qname=%s qtype=%s", qname, typeName(qtype))
 		msg := newResponseMsg(qname, qtype, dns.RcodeNameError, nil, []dns.RR{e.soa}, nil)
 		return msg, netip.Addr{}, nil
 	}
@@ -102,9 +106,11 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 	// Walk down: "." -> "com." -> "example.com."
 	for i := len(labels) - 1; i >= 0; i-- {
 		zone := dns.Fqdn(strings.Join(labels[i:], "."))
+		logf(logw, "delegation step zone=%s", zone)
 
 		nsSet, nextSrv, resp, err := r.queryForDelegation(ctx, zone, servers, qname, logw)
 		if err != nil {
+			logf(logw, "delegation error zone=%s err=%v", zone, err)
 			return nil, netip.Addr{}, err
 		}
 
@@ -113,16 +119,20 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 			if len(targetServers) == 0 {
 				targetServers = servers
 			}
+			logf(logw, "delegation terminal zone=%s servers=%d", zone, len(targetServers))
 			return r.queryFinal(ctx, qname, qtype, targetServers, depth, resp, logw)
 		}
 
 		if len(nsSet) == 0 {
 			if resp != nil && resp.Rcode == dns.RcodeNameError {
 				if zone == qname {
-					return r.handleTerminal(zone, resp)
+					logf(logw, "delegation NXDOMAIN terminal zone=%s", zone)
+					return r.handleTerminal(zone, resp, logw)
 				}
+				logf(logw, "delegation NXDOMAIN zone=%s continuing", zone)
 				return r.queryFinal(ctx, qname, qtype, servers, depth, resp, logw)
 			}
+			logf(logw, "delegation no-ns zone=%s", zone)
 			continue
 		}
 		servers = nextSrv
@@ -144,11 +154,15 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 	var last *dns.Msg
 	refusedSeen := false
 	for _, svr := range shuffle(parentServers) {
+		serverStr := r.addrPort(svr).String()
+		logf(logw, "delegation query zone=%s server=%s", zone, serverStr)
 		resp, err := r.exchange(ctx, m, svr, logw)
 		if err != nil {
+			logf(logw, "delegation error zone=%s server=%s err=%v", zone, serverStr, err)
 			continue
 		}
 		last = resp
+		logf(logw, "delegation response zone=%s server=%s rcode=%s", zone, serverStr, dns.RcodeToString[resp.Rcode])
 
 		if resp.Rcode == dns.RcodeRefused || resp.Rcode == dns.RcodeNotImplemented {
 			refusedSeen = true
@@ -183,16 +197,21 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 	}
 	// Fallback to non-QMIN if we observed REFUSED/NOTIMP
 	if refusedSeen {
+		logf(logw, "delegation fallback zone=%s", zone)
 		m2 := new(dns.Msg)
 		m2.SetQuestion(fullQname, dns.TypeNS) // ask NS for the full name (non-minimized)
 		m2.RecursionDesired = false
 		setEDNS(m2)
 		for _, svr := range shuffle(parentServers) {
+			serverStr := r.addrPort(svr).String()
+			logf(logw, "delegation fallback query full=%s server=%s", fullQname, serverStr)
 			resp, err := r.exchange(ctx, m2, svr, logw)
 			if err != nil {
+				logf(logw, "delegation fallback error full=%s server=%s err=%v", fullQname, serverStr, err)
 				continue
 			}
 			last = resp
+			logf(logw, "delegation fallback response full=%s server=%s rcode=%s", fullQname, serverStr, dns.RcodeToString[resp.Rcode])
 			if resp.Rcode == dns.RcodeNameError {
 				if soa := extractSOA(resp); soa != nil {
 					r.negPut(fullQname, dns.TypeNS, soa)
@@ -208,6 +227,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 				addrs = r.resolveNSAddrs(ctx, nsOwners, logw)
 			}
 			if len(addrs) > 0 {
+				logf(logw, "delegation returning zone=%s addrs=%d", zone, len(addrs))
 				return nsOwners, addrs, resp, nil
 			}
 		}
@@ -222,6 +242,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 // queryFinal asks the authoritative (or closest) servers for the target qname/qtype.
 // It also performs CNAME/DNAME chasing, with a loop bound controlled by depth.
 func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []netip.Addr, depth int, parentResp *dns.Msg, logw io.Writer) (*dns.Msg, netip.Addr, error) {
+	logf(logw, "final query qname=%s qtype=%s servers=%d", qname, typeName(qtype), len(authServers))
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
 	m.RecursionDesired = false
@@ -232,6 +253,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 	for _, svr := range shuffle(authServers) {
 		resp, err := r.exchange(ctx, m, svr, logw)
 		if err != nil {
+			logf(logw, "final query error qname=%s server=%s err=%v", qname, r.addrPort(svr), err)
 			continue
 		}
 		last = resp
@@ -239,11 +261,14 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 
 		switch resp.Rcode {
 		case dns.RcodeSuccess:
+			logf(logw, "final query success partial qname=%s server=%s", qname, r.addrPort(svr))
 			if hasRRType(resp.Answer, qtype) {
+				logf(logw, "final query returning answer qname=%s server=%s", qname, r.addrPort(svr))
 				return resp, svr, nil
 			}
 
 			if tgt, ok := cnameTarget(resp, qname); ok {
+				logf(logw, "final query cname qname=%s target=%s", qname, tgt)
 				msg, origin, err := r.resolveWithDepth(ctx, tgt, qtype, depth+1, logw)
 				if err != nil {
 					return nil, netip.Addr{}, err
@@ -253,6 +278,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 			}
 
 			if tgt, ok := dnameSynthesize(resp, qname); ok {
+				logf(logw, "final query dname qname=%s target=%s", qname, tgt)
 				msg, origin, err := r.resolveWithDepth(ctx, tgt, qtype, depth+1, logw)
 				if err != nil {
 					return nil, netip.Addr{}, err
@@ -263,6 +289,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 
 			if soa := extractSOA(resp); soa != nil {
 				r.negPut(qname, qtype, soa)
+				logf(logw, "final query NODATA cached soa qname=%s", qname)
 				return resp, svr, nil
 			}
 
@@ -270,6 +297,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 			if soa := extractSOA(resp); soa != nil {
 				r.negPut(qname, qtype, soa)
 			}
+			logf(logw, "final query NXDOMAIN qname=%s", qname)
 			return resp, svr, nil
 		}
 	}
@@ -277,22 +305,26 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 	if last == nil {
 		if parentResp != nil && qtype == dns.TypeNS {
 			if answers := delegationRecords(parentResp, qname); len(answers) > 0 {
+				logf(logw, "final query parent delegation qname=%s count=%d", qname, len(answers))
 				parent := parentResp.Copy()
 				parent.Answer = append([]dns.RR(nil), answers...)
 				return parent, netip.Addr{}, nil
 			}
 		}
+		logf(logw, "final query no response qname=%s", qname)
 		return nil, netip.Addr{}, errors.New("no response from authoritative servers")
 	}
+	logf(logw, "final query completed qname=%s server=%s rcode=%s", qname, r.addrPort(lastServer), dns.RcodeToString[last.Rcode])
 	return last, lastServer, nil
 }
 
-func (r *Resolver) handleTerminal(zone string, resp *dns.Msg) (*dns.Msg, netip.Addr, error) {
+func (r *Resolver) handleTerminal(zone string, resp *dns.Msg, logw io.Writer) (*dns.Msg, netip.Addr, error) {
 	if resp == nil {
 		return nil, netip.Addr{}, errors.New("terminal with no response")
 	}
 	if soa := extractSOA(resp); soa != nil {
 		r.negPut(zone, dns.TypeNS, soa)
+		logf(logw, "terminal cached soa zone=%s", zone)
 	}
 	return resp, netip.Addr{}, nil
 }
@@ -300,26 +332,32 @@ func (r *Resolver) handleTerminal(zone string, resp *dns.Msg) (*dns.Msg, netip.A
 // -------- Transport & helpers ---------
 
 func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server netip.Addr, logw io.Writer) (resp *dns.Msg, err error) {
-	if !server.Is6() || r.usingIPv6() {
-		if r.usingUDP() {
-			if resp, err = r.exchangeWithNetwork(ctx, "udp", m, server, logw); err != nil {
-				if r.maybeDisableUdp(err) {
-					err = nil
-				}
+	serverStr := r.addrPort(server).String()
+	if server.Is6() && !r.usingIPv6() {
+		logf(logw, "exchange skip IPv6 server=%s", serverStr)
+		return nil, net.ErrClosed
+	}
+	if r.usingUDP() {
+		logf(logw, "exchange udp server=%s", serverStr)
+		if resp, err = r.exchangeWithNetwork(ctx, "udp", m, server, logw); err != nil {
+			if r.maybeDisableUdp(err) {
+				err = nil
+			}
+			if err != nil {
+				logf(logw, "exchange udp error server=%s err=%v", serverStr, err)
 			}
 		}
-		if err == nil && (resp == nil || resp.Truncated) {
-			resp, err = r.exchangeWithNetwork(ctx, "tcp", m, server, logw)
-		}
-	} else {
-		err = net.ErrClosed
+	}
+	if err == nil && (resp == nil || resp.Truncated) {
+		logf(logw, "exchange tcp server=%s trigger=%v", serverStr, resp != nil && resp.Truncated)
+		resp, err = r.exchangeWithNetwork(ctx, "tcp", m, server, logw)
 	}
 	return
 }
 
 func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *dns.Msg, server netip.Addr, logw io.Writer) (resp *dns.Msg, err error) {
 	var dnsConn *dns.Conn
-	if dnsConn, err = r.dialDNSConn(ctx, network, server); err == nil {
+	if dnsConn, err = r.dialDNSConn(ctx, network, server, logw); err == nil {
 		defer dnsConn.Close()
 		deadline := r.deadline(ctx)
 		if !deadline.IsZero() {
@@ -329,10 +367,13 @@ func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *d
 			resp, err = dnsConn.ReadMsg()
 		}
 	}
+	if err != nil {
+		logf(logw, "exchange network=%s server=%s err=%v", network, r.addrPort(server), err)
+	}
 	return
 }
 
-func (r *Resolver) dialDNSConn(ctx context.Context, network string, server netip.Addr) (dnsConn *dns.Conn, err error) {
+func (r *Resolver) dialDNSConn(ctx context.Context, network string, server netip.Addr, logw io.Writer) (dnsConn *dns.Conn, err error) {
 	var rawConn net.Conn
 	addrPort := r.addrPort(server)
 	if rawConn, err = r.DialContext(ctx, network, addrPort.String()); err == nil {
@@ -342,6 +383,9 @@ func (r *Resolver) dialDNSConn(ctx context.Context, network string, server netip
 		}
 	} else if server.Is6() {
 		r.maybeDisableIPv6(err)
+	}
+	if err != nil {
+		logf(logw, "dial error network=%s server=%s err=%v", network, addrPort, err)
 	}
 	return
 }
@@ -484,6 +528,7 @@ func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string, logw i
 		cached, ok := r.addrCache[host]
 		r.addrMu.RUnlock()
 		if ok {
+			logf(logw, "resolveNS cached host=%s addrs=%d", host, len(cached))
 			addrs = append(addrs, cached...)
 		} else {
 			var resolved []netip.Addr
@@ -514,10 +559,12 @@ func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string, logw i
 				r.addrMu.Lock()
 				r.addrCache[host] = resolved
 				r.addrMu.Unlock()
+				logf(logw, "resolveNS resolved host=%s addrs=%d", host, len(resolved))
 				addrs = append(addrs, resolved...)
 			}
 		}
 	}
+	logf(logw, "resolveNS total addrs=%d", len(addrs))
 	return dedupAddrs(addrs)
 }
 
@@ -581,6 +628,19 @@ func ipToAddr(ip net.IP) (netip.Addr, bool) {
 		return netip.AddrFrom16(arr), true
 	}
 	return netip.Addr{}, false
+}
+
+func typeName(qtype uint16) string {
+	if name, ok := dns.TypeToString[qtype]; ok {
+		return name
+	}
+	return strconv.Itoa(int(qtype))
+}
+
+func logf(logw io.Writer, format string, args ...any) {
+	if logw != nil {
+		_, _ = fmt.Fprintf(logw, format+"\n", args...)
+	}
 }
 
 // -------- CNAME/DNAME helpers ---------
