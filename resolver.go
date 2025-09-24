@@ -200,13 +200,11 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 
 		nsOwners := extractDelegationNS(resp, zone)
 		if len(nsOwners) == 0 {
-			if resp != nil {
-				if resp.Rcode == dns.RcodeNameError {
-					if soa := extractSOA(resp); soa != nil {
-						r.negPut(zone, dns.TypeNS, soa)
-					}
-					return nil, nil, resp, nil
+			if resp.Rcode == dns.RcodeNameError {
+				if soa := extractSOA(resp); soa != nil {
+					r.negPut(zone, dns.TypeNS, soa)
 				}
+				return nil, nil, resp, nil
 			}
 			continue
 		}
@@ -363,7 +361,11 @@ func (r *Resolver) handleTerminal(zone string, resp *dns.Msg, depth int, log log
 // -------- Transport & helpers ---------
 
 func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server netip.Addr, depth int, log logContext) (resp *dns.Msg, err error) {
-	resp, err = r.exchangeWithNetwork(ctx, "udp", m, server, depth+1, log)
+	if resp, err = r.exchangeWithNetwork(ctx, "udp", m, server, depth+1, log); err != nil {
+		if r.maybeDisableUdp(err) {
+			err = nil
+		}
+	}
 	if err == nil && (resp == nil || resp.Truncated) {
 		resp, err = r.exchangeWithNetwork(ctx, "tcp", m, server, depth+1, log)
 	}
