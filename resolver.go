@@ -117,7 +117,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 			if len(targetServers) == 0 {
 				targetServers = servers
 			}
-			return r.queryFinal(ctx, qname, qtype, targetServers, servers, depth)
+			return r.queryFinal(ctx, qname, qtype, targetServers, servers, depth, resp)
 		}
 
 		if len(nsSet) == 0 {
@@ -125,13 +125,13 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 				if zone == qname {
 					return r.handleTerminal(zone, resp)
 				}
-				return r.queryFinal(ctx, qname, qtype, servers, servers, depth)
+				return r.queryFinal(ctx, qname, qtype, servers, servers, depth, resp)
 			}
 			continue
 		}
 		servers = nextSrv
 	}
-	return r.queryFinal(ctx, qname, qtype, servers, servers, depth)
+	return r.queryFinal(ctx, qname, qtype, servers, servers, depth, nil)
 }
 
 // -------- Core steps ---------
@@ -225,7 +225,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 
 // queryFinal asks the authoritative (or closest) servers for the target qname/qtype.
 // It also performs CNAME/DNAME chasing, with a loop bound controlled by depth.
-func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []string, fallbackParent []string, depth int) (*Result, error) {
+func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []string, fallbackParent []string, depth int, parentResp *dns.Msg) (*Result, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
 	m.RecursionDesired = false
@@ -298,6 +298,11 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 	}
 
 	if last == nil {
+		if parentResp != nil && qtype == dns.TypeNS {
+			if answers := delegationRecords(parentResp, qname); len(answers) > 0 {
+				return &Result{Answers: answers, Authority: parentResp.Ns, Additional: parentResp.Extra, Server: "", RCODE: parentResp.Rcode}, nil
+			}
+		}
 		return nil, errors.New("no response from authoritative servers")
 	}
 	return &Result{Answers: last.Answer, Authority: last.Ns, Additional: last.Extra, Server: "", RCODE: last.Rcode}, nil
@@ -365,6 +370,21 @@ func extractDelegationNS(m *dns.Msg, zone string) []string {
 		if ns, ok := rr.(*dns.NS); ok {
 			if strings.EqualFold(ns.Hdr.Name, zone) {
 				out = append(out, strings.ToLower(ns.Ns))
+			}
+		}
+	}
+	return out
+}
+
+func delegationRecords(m *dns.Msg, zone string) []dns.RR {
+	var out []dns.RR
+	if m == nil {
+		return out
+	}
+	for _, rr := range m.Ns {
+		if ns, ok := rr.(*dns.NS); ok {
+			if strings.EqualFold(ns.Hdr.Name, zone) {
+				out = append(out, rr)
 			}
 		}
 	}
