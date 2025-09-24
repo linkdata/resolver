@@ -9,15 +9,14 @@ import (
 
 func Test_A_console_aws_amazon_com(t *testing.T) {
 	r := New()
-	result, err := r.Resolve(t.Context(), "console.aws.amazon.com.", dns.TypeA)
+	qname := dns.Fqdn("console.aws.amazon.com")
+	result, err := r.Resolve(t.Context(), qname, dns.TypeA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if x := result.RCODE; x != dns.RcodeSuccess {
 		t.Error(dns.RcodeToString[x])
 	}
-	var chainOwner string
-	chainOwner = dns.Fqdn("console.aws.amazon.com")
 	travelled := make(map[string]struct{})
 	var chainLength int
 	var haveA bool
@@ -29,15 +28,15 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 			var cname *dns.CNAME
 			var ok bool
 			if cname, ok = rr.(*dns.CNAME); ok {
-				if strings.EqualFold(cname.Hdr.Name, chainOwner) {
+				if strings.EqualFold(cname.Hdr.Name, qname) {
 					var ownerKey string
 					var haveLoop bool
-					ownerKey = strings.ToLower(chainOwner)
+					ownerKey = strings.ToLower(qname)
 					if _, haveLoop = travelled[ownerKey]; haveLoop {
-						t.Fatalf("cname loop detected at %s", chainOwner)
+						t.Fatalf("cname loop detected at %s", qname)
 					}
 					travelled[ownerKey] = struct{}{}
-					chainOwner = strings.ToLower(dns.Fqdn(cname.Target))
+					qname = strings.ToLower(dns.Fqdn(cname.Target))
 					foundCNAME = true
 				}
 			}
@@ -45,14 +44,14 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 		if foundCNAME {
 			chainLength++
 			if chainLength > len(result.Answers) {
-				t.Fatalf("cname chain exceeded answers for %s", chainOwner)
+				t.Fatalf("cname chain exceeded answers for %s", qname)
 			}
 		} else {
 			for _, rr := range result.Answers {
 				var arecord *dns.A
 				var ok bool
 				if arecord, ok = rr.(*dns.A); ok {
-					if strings.EqualFold(arecord.Hdr.Name, chainOwner) {
+					if strings.EqualFold(arecord.Hdr.Name, qname) {
 						haveA = true
 					}
 				}
@@ -61,16 +60,17 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 		}
 	}
 	if chainLength < 1 {
-		t.Fatalf("expected cname chain for %s", chainOwner)
+		t.Fatalf("expected cname chain for %s", qname)
 	}
 	if !haveA {
-		t.Fatalf("missing A record terminating chain at %s", chainOwner)
+		t.Fatalf("missing A record terminating chain at %s", qname)
 	}
 }
 
 func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
 	r := New()
-	result, err := r.Resolve(t.Context(), "qnamemintest.internet.nl.", dns.TypeTXT)
+	qname := dns.Fqdn("qnamemintest.internet.nl")
+	result, err := r.Resolve(t.Context(), qname, dns.TypeTXT)
 	if err != nil {
 		t.Fatal(err)
 	}

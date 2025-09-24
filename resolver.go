@@ -88,7 +88,7 @@ func New() *Resolver {
 
 // Resolve performs iterative resolution with QNAME minimization for qname/qtype.
 func (r *Resolver) Resolve(ctx context.Context, qname string, qtype uint16) (*Result, error) {
-	return r.resolveWithDepth(ctx, ensureFQDN(strings.ToLower(qname)), qtype, 0)
+	return r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(qname)), qtype, 0)
 }
 
 // resolveWithDepth is Resolve plus a chase-depth counter to avoid infinite loops.
@@ -101,11 +101,11 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 	}
 
 	servers := append([]string(nil), r.roots...)
-	labels := labelsOf(qname)
+	labels := dns.SplitDomainName(qname)
 
 	// Walk down: "." -> "com." -> "example.com."
-	for i := len(labels) - 2; i >= 0; i-- {
-		zone := ensureFQDN(strings.Join(labels[i:], "."))
+	for i := len(labels) - 1; i >= 0; i-- {
+		zone := dns.Fqdn(strings.Join(labels[i:], "."))
 
 		nsSet, nextSrv, resp, err := r.queryForDelegation(ctx, zone, servers, qname)
 		if err != nil {
@@ -344,19 +344,6 @@ func setEDNS(m *dns.Msg) {
 	m.Extra = append(m.Extra, opt)
 }
 
-func labelsOf(qname string) []string {
-	parts := strings.Split(strings.TrimSuffix(qname, "."), ".")
-	parts = append(parts, "") // represent root as empty label
-	return parts
-}
-
-func ensureFQDN(s string) string {
-	if !strings.HasSuffix(s, ".") {
-		return s + "."
-	}
-	return s
-}
-
 func shuffle[T any](in []T) []T {
 	out := append([]T(nil), in...)
 	sort.Slice(out, func(i, j int) bool { return fmt.Sprint(out[i]) < fmt.Sprint(out[j]) })
@@ -370,16 +357,6 @@ func hasRRType(rrs []dns.RR, t uint16) bool {
 		}
 	}
 	return false
-}
-
-func extractNS(m *dns.Msg) []string {
-	var out []string
-	for _, rr := range m.Ns {
-		if ns, ok := rr.(*dns.NS); ok {
-			out = append(out, strings.ToLower(ns.Ns))
-		}
-	}
-	return out
 }
 
 func extractDelegationNS(m *dns.Msg, zone string) []string {
@@ -504,7 +481,7 @@ func cnameTarget(resp *dns.Msg, owner string) (string, bool) {
 	lo := strings.ToLower(owner)
 	for _, rr := range resp.Answer {
 		if c, ok := rr.(*dns.CNAME); ok && strings.EqualFold(c.Hdr.Name, lo) {
-			return ensureFQDN(strings.ToLower(c.Target)), true
+			return dns.Fqdn(strings.ToLower(c.Target)), true
 		}
 	}
 	return "", false
@@ -520,7 +497,7 @@ func dnameSynthesize(resp *dns.Msg, qname string) (string, bool) {
 				prefix := strings.TrimSuffix(q, owner)
 				// Avoid double dots when concatenating
 				prefix = strings.TrimSuffix(prefix, ".")
-				tgt := ensureFQDN(strings.Trim(prefix, ".") + "." + strings.ToLower(d.Target))
+				tgt := dns.Fqdn(strings.Trim(prefix, ".") + "." + strings.ToLower(d.Target))
 				return tgt, true
 			}
 		}
