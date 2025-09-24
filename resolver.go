@@ -49,7 +49,6 @@ type Resolver struct {
 	roots []string // "ip:port" of root servers
 	proxy.ContextDialer
 	Timeout     time.Duration
-	DNSPort     uint16
 	maxChase    int // max CNAME/DNAME chase depth
 	negMu       sync.RWMutex
 	neg         map[negKey]negEntry
@@ -87,7 +86,6 @@ func New() (r *Resolver) {
 		roots:         roots,
 		ContextDialer: &net.Dialer{},
 		Timeout:       3 * time.Second,
-		DNSPort:       53,
 		maxChase:      8,
 		neg:           make(map[negKey]negEntry),
 		addrCache:     make(map[string][]string),
