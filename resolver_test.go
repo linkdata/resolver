@@ -14,6 +14,7 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 		This domain tests that CNAME chains are followed.
 	*/
 	r := New()
+	r.OrderRoots(t.Context())
 	qname := dns.Fqdn("console.aws.amazon.com")
 	result, err := r.Resolve(t.Context(), qname, dns.TypeA)
 	if err != nil {
@@ -77,6 +78,7 @@ func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
 		This domain tests that QNAME minimization works.
 	*/
 	r := New()
+	r.OrderRoots(t.Context())
 	qname := dns.Fqdn("qnamemintest.internet.nl")
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
@@ -117,6 +119,7 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 	*/
 
 	r := New()
+	r.OrderRoots(t.Context())
 	r.Timeout = time.Second
 	qname := dns.Fqdn("bankgirot.nu")
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)

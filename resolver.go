@@ -23,13 +23,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/net/proxy"
 )
+
+//go:generate go run ./cmd/genhints roothints.gen.go
 
 // -------- Public API ---------
 
@@ -42,13 +46,19 @@ type Result struct {
 }
 
 type Resolver struct {
-	roots     []string // "ip:port" of root servers
-	Timeout   time.Duration
-	negMu     sync.RWMutex
-	neg       map[negKey]negEntry
-	maxChase  int // max CNAME/DNAME chase depth
-	addrMu    sync.RWMutex
-	addrCache map[string][]string
+	roots []string // "ip:port" of root servers
+	proxy.ContextDialer
+	Timeout     time.Duration
+	DNSPort     uint16
+	maxChase    int // max CNAME/DNAME chase depth
+	negMu       sync.RWMutex
+	neg         map[negKey]negEntry
+	addrMu      sync.RWMutex
+	addrCache   map[string][]string
+	mu          sync.RWMutex // protects following
+	useIPv4     bool
+	useIPv6     bool
+	rootServers []netip.Addr
 }
 
 type negKey struct {
@@ -62,27 +72,28 @@ type negEntry struct {
 }
 
 // New returns a resolver seeded with IANA root servers.
-func New() *Resolver {
+func New() (r *Resolver) {
+	roots := make([]string, 0, len(Roots4)+len(Roots6))
+	rootAddrs := make([]netip.Addr, 0, len(Roots4)+len(Roots6))
+	for _, addr := range Roots4 {
+		roots = append(roots, net.JoinHostPort(addr.String(), "53"))
+		rootAddrs = append(rootAddrs, addr)
+	}
+	for _, addr := range Roots6 {
+		roots = append(roots, net.JoinHostPort(addr.String(), "53"))
+		rootAddrs = append(rootAddrs, addr)
+	}
 	return &Resolver{
-		roots: []string{
-			"198.41.0.4:53",     // a.root-servers.net
-			"199.9.14.201:53",   // b
-			"192.33.4.12:53",    // c
-			"199.7.91.13:53",    // d
-			"192.203.230.10:53", // e
-			"192.5.5.241:53",    // f
-			"192.112.36.4:53",   // g
-			"198.97.190.53:53",  // h
-			"192.36.148.17:53",  // i
-			"192.58.128.30:53",  // j
-			"193.0.14.129:53",   // k
-			"199.7.83.42:53",    // l
-			"202.12.27.33:53",   // m
-		},
-		Timeout:   3 * time.Second,
-		neg:       make(map[negKey]negEntry),
-		maxChase:  8,
-		addrCache: make(map[string][]string),
+		roots:         roots,
+		ContextDialer: &net.Dialer{},
+		Timeout:       3 * time.Second,
+		DNSPort:       53,
+		maxChase:      8,
+		neg:           make(map[negKey]negEntry),
+		addrCache:     make(map[string][]string),
+		useIPv4:       len(Roots4) > 0,
+		useIPv6:       len(Roots6) > 0,
+		rootServers:   rootAddrs,
 	}
 }
 
