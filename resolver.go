@@ -339,17 +339,76 @@ func (r *Resolver) handleTerminal(zone string, resp *dns.Msg) (*Result, error) {
 // -------- Transport & helpers ---------
 
 func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server string) (*dns.Msg, error) {
-	c := &dns.Client{Net: "udp", Timeout: r.Timeout, SingleInflight: true}
-	resp, _, err := c.ExchangeContext(ctx, m, server)
+	resp, err := r.exchangeWithNetwork(ctx, "udp", m, server)
 	if err != nil {
 		return nil, err
 	}
-	if resp.Truncated { // TC → retry with TCP
-		cTCP := &dns.Client{Net: "tcp", Timeout: r.Timeout, SingleInflight: true}
-		resp, _, err := cTCP.ExchangeContext(ctx, m, server)
-		return resp, err
+	if resp.Truncated {
+		return r.exchangeWithNetwork(ctx, "tcp", m, server)
 	}
 	return resp, nil
+}
+
+func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *dns.Msg, server string) (*dns.Msg, error) {
+	conn, err := r.dialDNSConn(ctx, network, server)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	deadline := r.deadline(ctx)
+	if !deadline.IsZero() {
+		_ = conn.SetDeadline(deadline)
+	}
+
+	if err = conn.WriteMsg(m); err != nil {
+		return nil, err
+	}
+
+	if !deadline.IsZero() {
+		_ = conn.SetReadDeadline(deadline)
+	}
+
+	resp, err := conn.ReadMsg()
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (r *Resolver) dialDNSConn(ctx context.Context, network, server string) (*dns.Conn, error) {
+	dialer := r.ContextDialer
+	if dialer == nil {
+		dialer = &net.Dialer{}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rawConn, err := dialer.DialContext(ctx, network, server)
+	if err != nil {
+		return nil, err
+	}
+	dnsConn := &dns.Conn{Conn: rawConn}
+	if strings.HasPrefix(network, "udp") {
+		dnsConn.UDPSize = dns.DefaultMsgSize
+	}
+	return dnsConn, nil
+}
+
+func (r *Resolver) deadline(ctx context.Context) time.Time {
+	var deadline time.Time
+	if ctx != nil {
+		if d, ok := ctx.Deadline(); ok {
+			deadline = d
+		}
+	}
+	if r.Timeout > 0 {
+		limit := time.Now().Add(r.Timeout)
+		if deadline.IsZero() || limit.Before(deadline) {
+			deadline = limit
+		}
+	}
+	return deadline
 }
 
 func setEDNS(m *dns.Msg) {
