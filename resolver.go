@@ -1,0 +1,468 @@
+// Package resolver provides a minimal iterative DNS resolver with QNAME minimization
+// using github.com/miekg/dns for wire format and transport.
+//
+// Now includes:
+//   - CNAME/DNAME chasing with loop protection.
+//   - Fallback to non-QMIN when a parent returns REFUSED (or NOTIMP) during
+//     a QNAME-minimized delegation step.
+//
+// ⚠️ This is still a learning-oriented skeleton. It simplifies DNSSEC, parallelism,
+// retries, ENT/wildcard edges, etc.
+//
+// Usage:
+//
+//	r := resolver.New()
+//	res, err := r.Resolve(context.Background(), "www.example.com.", dns.TypeA)
+//	...
+//
+// Tested with Go ≥1.21.
+package resolver
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/miekg/dns"
+)
+
+// -------- Public API ---------
+
+type Result struct {
+	Answers    []dns.RR
+	Authority  []dns.RR
+	Additional []dns.RR
+	Server     string
+	RCODE      int // dns.Rcode
+}
+
+type Resolver struct {
+	roots    []string // "ip:port" of root servers
+	Timeout  time.Duration
+	negMu    sync.RWMutex
+	neg      map[negKey]negEntry
+	maxChase int // max CNAME/DNAME chase depth
+}
+
+type negKey struct {
+	name  string
+	qtype uint16
+}
+
+type negEntry struct {
+	expiry time.Time
+	soa    *dns.SOA
+}
+
+// New returns a resolver seeded with IANA root servers.
+func New() *Resolver {
+	return &Resolver{
+		roots: []string{
+			"198.41.0.4:53",     // a.root-servers.net
+			"199.9.14.201:53",   // b
+			"192.33.4.12:53",    // c
+			"199.7.91.13:53",    // d
+			"192.203.230.10:53", // e
+			"192.5.5.241:53",    // f
+			"192.112.36.4:53",   // g
+			"198.97.190.53:53",  // h
+			"192.36.148.17:53",  // i
+			"192.58.128.30:53",  // j
+			"193.0.14.129:53",   // k
+			"199.7.83.42:53",    // l
+			"202.12.27.33:53",   // m
+		},
+		Timeout:  3 * time.Second,
+		neg:      make(map[negKey]negEntry),
+		maxChase: 8,
+	}
+}
+
+// Resolve performs iterative resolution with QNAME minimization for qname/qtype.
+func (r *Resolver) Resolve(ctx context.Context, qname string, qtype uint16) (*Result, error) {
+	return r.resolveWithDepth(ctx, ensureFQDN(strings.ToLower(qname)), qtype, 0)
+}
+
+// resolveWithDepth is Resolve plus a chase-depth counter to avoid infinite loops.
+func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uint16, depth int) (*Result, error) {
+	if depth > r.maxChase {
+		return nil, fmt.Errorf("cname/dname chain too deep (> %d)", r.maxChase)
+	}
+	if e := r.negGet(qname, qtype); e != nil {
+		return &Result{RCODE: int(dns.RcodeNameError), Authority: []dns.RR{e.soa}}, nil
+	}
+
+	servers := append([]string(nil), r.roots...)
+	labels := labelsOf(qname)
+
+	// Walk down: "." -> "com." -> "example.com."
+	for i := len(labels) - 2; i >= 0; i-- {
+		zone := strings.Join(labels[i:], ".")
+		if zone == "" {
+			zone = "."
+		} else if zone[0] != '.' {
+			zone += "."
+		}
+
+		nsSet, nextSrv, resp, err := r.queryForDelegation(ctx, zone, servers, qname)
+		if err != nil {
+			return nil, err
+		}
+
+		if zone == qname {
+			return r.queryFinal(ctx, qname, qtype, nextSrv, servers, depth)
+		}
+
+		if len(nsSet) == 0 {
+			return r.handleTerminal(zone, resp)
+		}
+		servers = nextSrv
+	}
+	return r.queryFinal(ctx, qname, qtype, servers, servers, depth)
+}
+
+// -------- Core steps ---------
+
+// queryForDelegation performs the QMIN step at `zone` against `parentServers`.
+// If servers REFUSE/NOTIMP the minimized NS query, retry with non-QMIN (ask NS for the full qname).
+// Returns: (nsOwnerNames, resolvedServerAddrs, lastResponse, error)
+func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentServers []string, fullQname string) ([]string, []string, *dns.Msg, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(zone, dns.TypeNS)
+	setEDNS(m)
+
+	var last *dns.Msg
+	refusedSeen := false
+	for _, svr := range shuffle(parentServers) {
+		resp, err := r.exchange(ctx, m, svr)
+		if err != nil {
+			continue
+		}
+		last = resp
+
+		if resp.Rcode == dns.RcodeRefused || resp.Rcode == dns.RcodeNotImplemented {
+			refusedSeen = true
+			continue
+		}
+		if resp.Rcode == dns.RcodeNameError { // NXDOMAIN at parent ⇒ bubble up
+			if soa := extractSOA(resp); soa != nil {
+				r.negPut(zone, dns.TypeNS, soa)
+			}
+			return nil, nil, resp, nil
+		}
+
+		nsOwners := extractNS(resp)
+		if len(nsOwners) == 0 {
+			return nil, nil, resp, nil
+		}
+		addrs := glueAddresses(resp)
+		if len(addrs) == 0 {
+			addrs = r.resolveNSAddrs(ctx, nsOwners)
+		}
+		if len(addrs) > 0 {
+			return nsOwners, addrs, resp, nil
+		}
+	}
+	// Fallback to non-QMIN if we observed REFUSED/NOTIMP
+	if refusedSeen {
+		m2 := new(dns.Msg)
+		m2.SetQuestion(fullQname, dns.TypeNS) // ask NS for the full name (non-minimized)
+		setEDNS(m2)
+		for _, svr := range shuffle(parentServers) {
+			resp, err := r.exchange(ctx, m2, svr)
+			if err != nil {
+				continue
+			}
+			last = resp
+			if resp.Rcode == dns.RcodeNameError {
+				if soa := extractSOA(resp); soa != nil {
+					r.negPut(fullQname, dns.TypeNS, soa)
+				}
+				return nil, nil, resp, nil
+			}
+			nsOwners := extractNS(resp)
+			if len(nsOwners) == 0 {
+				continue
+			}
+			addrs := glueAddresses(resp)
+			if len(addrs) == 0 {
+				addrs = r.resolveNSAddrs(ctx, nsOwners)
+			}
+			if len(addrs) > 0 {
+				return nsOwners, addrs, resp, nil
+			}
+		}
+	}
+
+	if last == nil {
+		return nil, nil, nil, errors.New("no response from parent servers")
+	}
+	return nil, nil, last, nil
+}
+
+// queryFinal asks the authoritative (or closest) servers for the target qname/qtype.
+// It also performs CNAME/DNAME chasing, with a loop bound controlled by depth.
+func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []string, fallbackParent []string, depth int) (*Result, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(qname, qtype)
+	setEDNS(m)
+
+	var last *dns.Msg
+	for _, svr := range shuffle(authServers) {
+		resp, err := r.exchange(ctx, m, svr)
+		if err != nil {
+			continue
+		}
+		last = resp
+
+		switch resp.Rcode {
+		case dns.RcodeSuccess:
+			// If we got the desired RRset, return it directly.
+			if hasRRType(resp.Answer, qtype) {
+				return &Result{Answers: resp.Answer, Authority: resp.Ns, Additional: resp.Extra, Server: svr, RCODE: resp.Rcode}, nil
+			}
+
+			// CNAME chase: if owner has CNAME, follow it.
+			if tgt, ok := cnameTarget(resp, qname); ok {
+				return r.resolveWithDepth(ctx, tgt, qtype, depth+1)
+			}
+
+			// DNAME chase: synthesize target and follow.
+			if tgt, ok := dnameSynthesize(resp, qname); ok {
+				return r.resolveWithDepth(ctx, tgt, qtype, depth+1)
+			}
+
+			// NODATA? If SOA present, negative-cache and return.
+			if soa := extractSOA(resp); soa != nil {
+				r.negPut(qname, qtype, soa)
+				return &Result{Answers: nil, Authority: []dns.RR{soa}, Additional: resp.Extra, Server: svr, RCODE: resp.Rcode}, nil
+			}
+
+			// Otherwise, try next server.
+		case dns.RcodeNameError:
+			if soa := extractSOA(resp); soa != nil {
+				r.negPut(qname, qtype, soa)
+			}
+			return &Result{Answers: nil, Authority: resp.Ns, Additional: resp.Extra, Server: svr, RCODE: resp.Rcode}, nil
+		}
+	}
+
+	if last == nil {
+		return nil, errors.New("no response from authoritative servers")
+	}
+	return &Result{Answers: last.Answer, Authority: last.Ns, Additional: last.Extra, Server: "", RCODE: last.Rcode}, nil
+}
+
+func (r *Resolver) handleTerminal(zone string, resp *dns.Msg) (*Result, error) {
+	if resp == nil {
+		return nil, errors.New("terminal with no response")
+	}
+	if resp.Rcode == dns.RcodeSuccess {
+		if soa := extractSOA(resp); soa != nil {
+			r.negPut(zone, dns.TypeNS, soa)
+			return &Result{RCODE: resp.Rcode, Authority: []dns.RR{soa}, Additional: resp.Extra}, nil
+		}
+	}
+	if resp.Rcode == dns.RcodeNameError {
+		if soa := extractSOA(resp); soa != nil {
+			r.negPut(zone, dns.TypeNS, soa)
+		}
+		return &Result{RCODE: resp.Rcode, Authority: resp.Ns, Additional: resp.Extra}, nil
+	}
+	return &Result{RCODE: resp.Rcode, Authority: resp.Ns, Additional: resp.Extra}, nil
+}
+
+// -------- Transport & helpers ---------
+
+func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server string) (*dns.Msg, error) {
+	c := &dns.Client{Net: "udp", Timeout: r.Timeout, SingleInflight: true}
+	resp, _, err := c.ExchangeContext(ctx, m, server)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Truncated { // TC → retry with TCP
+		cTCP := &dns.Client{Net: "tcp", Timeout: r.Timeout, SingleInflight: true}
+		resp, _, err := cTCP.ExchangeContext(ctx, m, server)
+		return resp, err
+	}
+	return resp, nil
+}
+
+func setEDNS(m *dns.Msg) {
+	opt := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+	opt.SetUDPSize(1232)
+	m.Extra = append(m.Extra, opt)
+}
+
+func labelsOf(qname string) []string {
+	parts := strings.Split(strings.TrimSuffix(qname, "."), ".")
+	parts = append(parts, "") // represent root as empty label
+	return parts
+}
+
+func ensureFQDN(s string) string {
+	if !strings.HasSuffix(s, ".") {
+		return s + "."
+	}
+	return s
+}
+
+func shuffle[T any](in []T) []T {
+	out := append([]T(nil), in...)
+	sort.Slice(out, func(i, j int) bool { return fmt.Sprint(out[i]) < fmt.Sprint(out[j]) })
+	return out
+}
+
+func hasRRType(rrs []dns.RR, t uint16) bool {
+	for _, rr := range rrs {
+		if rr.Header().Rrtype == t {
+			return true
+		}
+	}
+	return false
+}
+
+func extractNS(m *dns.Msg) []string {
+	var out []string
+	for _, rr := range m.Ns {
+		if ns, ok := rr.(*dns.NS); ok {
+			out = append(out, strings.ToLower(ns.Ns))
+		}
+	}
+	return out
+}
+
+func glueAddresses(m *dns.Msg) []string {
+	var addrs []string
+	for _, rr := range m.Extra {
+		switch a := rr.(type) {
+		case *dns.A:
+			addrs = append(addrs, net.JoinHostPort(a.A.String(), "53"))
+		case *dns.AAAA:
+			addrs = append(addrs, net.JoinHostPort(a.AAAA.String(), "53"))
+		}
+	}
+	return addrs
+}
+
+func extractSOA(m *dns.Msg) *dns.SOA {
+	for _, rr := range append(append([]dns.RR{}, m.Ns...), m.Answer...) {
+		if soa, ok := rr.(*dns.SOA); ok {
+			return soa
+		}
+	}
+	return nil
+}
+
+// resolveNSAddrs minimally resolves NS owner names to addresses by asking the roots → ...
+func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string) []string {
+	var addrs []string
+	for _, host := range nsOwners {
+		if res, err := r.Resolve(ctx, host, dns.TypeA); err == nil {
+			for _, rr := range res.Answers {
+				if a, ok := rr.(*dns.A); ok {
+					addrs = append(addrs, net.JoinHostPort(a.A.String(), "53"))
+				}
+			}
+		}
+		if res, err := r.Resolve(ctx, host, dns.TypeAAAA); err == nil {
+			for _, rr := range res.Answers {
+				if a, ok := rr.(*dns.AAAA); ok {
+					addrs = append(addrs, net.JoinHostPort(a.AAAA.String(), "53"))
+				}
+			}
+		}
+	}
+	return dedup(addrs)
+}
+
+func dedup(ss []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, s := range ss {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// -------- CNAME/DNAME helpers ---------
+
+func cnameTarget(resp *dns.Msg, owner string) (string, bool) {
+	lo := strings.ToLower(owner)
+	for _, rr := range resp.Answer {
+		if c, ok := rr.(*dns.CNAME); ok && strings.EqualFold(c.Hdr.Name, lo) {
+			return ensureFQDN(strings.ToLower(c.Target)), true
+		}
+	}
+	return "", false
+}
+
+// dnameSynthesize finds a DNAME and synthesizes the new qname per RFC 6672.
+func dnameSynthesize(resp *dns.Msg, qname string) (string, bool) {
+	q := strings.ToLower(qname)
+	for _, rr := range resp.Answer {
+		if d, ok := rr.(*dns.DNAME); ok {
+			owner := strings.ToLower(d.Hdr.Name)
+			if strings.HasSuffix(q, owner) {
+				prefix := strings.TrimSuffix(q, owner)
+				// Avoid double dots when concatenating
+				prefix = strings.TrimSuffix(prefix, ".")
+				tgt := ensureFQDN(strings.Trim(prefix, ".") + "." + strings.ToLower(d.Target))
+				return tgt, true
+			}
+		}
+	}
+	return "", false
+}
+
+// -------- Negative cache (minimal RFC 2308) ---------
+
+func (r *Resolver) negPut(name string, qtype uint16, soa *dns.SOA) {
+	if soa == nil {
+		return
+	}
+	minTTL := time.Duration(soa.Minttl) * time.Second
+	soaTTL := time.Duration(soa.Hdr.Ttl) * time.Second
+	if soaTTL > 0 && soaTTL < minTTL {
+		minTTL = soaTTL
+	}
+	if minTTL <= 0 {
+		minTTL = 30 * time.Second
+	}
+	r.negMu.Lock()
+	r.neg[negKey{strings.ToLower(name), qtype}] = negEntry{expiry: time.Now().Add(minTTL), soa: soa}
+	r.negMu.Unlock()
+}
+
+func (r *Resolver) negGet(name string, qtype uint16) *negEntry {
+	r.negMu.RLock()
+	e, ok := r.neg[negKey{strings.ToLower(name), qtype}]
+	r.negMu.RUnlock()
+	if !ok {
+		return nil
+	}
+	if time.Now().After(e.expiry) {
+		r.negMu.Lock()
+		delete(r.neg, negKey{strings.ToLower(name), qtype})
+		r.negMu.Unlock()
+		return nil
+	}
+	return &e
+}
+
+// -------- TODOs to reach production-grade ---------
+// - Parallel/racing to multiple servers per step; jittered retries/backoff.
+// - Full DNSSEC pipeline (DS lookups, validation, NSEC aggressive use).
+// - ENT & wildcard corner cases under QMIN.
+// - Smarter NS address resolution (bailiwick rules, cycle breaks).
+// - Positive cache with TTL tracking; serve-stale/prefetch.
+// - DoT/DoH transports; padding for privacy.
+// - Upstream health checks and selection policies.
