@@ -9,7 +9,7 @@ import (
 )
 
 func Resolve(ctx context.Context, r *resolver.Resolver, name string, qtype uint16) error {
-	msg, server, err := r.Resolve(ctx, name, qtype)
+	msg, server, err := r.Resolve(ctx, name, qtype, nil)
 	if err != nil {
 		return err
 	}

@@ -17,7 +17,7 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 	r := New()
 	r.OrderRoots(t.Context(), time.Millisecond*100)
 	qname := dns.Fqdn("console.aws.amazon.com")
-	msg, _, err := r.Resolve(t.Context(), qname, dns.TypeA)
+	msg, _, err := r.Resolve(t.Context(), qname, dns.TypeA, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
 	qname := dns.Fqdn("qnamemintest.internet.nl")
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	msg, _, err := r.Resolve(ctx, qname, dns.TypeTXT)
+	msg, _, err := r.Resolve(ctx, qname, dns.TypeTXT, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 	qname := dns.Fqdn("bankgirot.nu")
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	msg, _, err := r.Resolve(ctx, qname, dns.TypeNS)
+	msg, _, err := r.Resolve(ctx, qname, dns.TypeNS, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

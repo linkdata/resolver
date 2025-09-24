@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"sort"
@@ -81,12 +82,12 @@ func New() (r *Resolver) {
 }
 
 // Resolve performs iterative resolution with QNAME minimization for qname/qtype.
-func (r *Resolver) Resolve(ctx context.Context, qname string, qtype uint16) (*dns.Msg, netip.Addr, error) {
-	return r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(qname)), qtype, 0)
+func (r *Resolver) Resolve(ctx context.Context, qname string, qtype uint16, logw io.Writer) (*dns.Msg, netip.Addr, error) {
+	return r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(qname)), qtype, 0, logw)
 }
 
 // resolveWithDepth is Resolve plus a chase-depth counter to avoid infinite loops.
-func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uint16, depth int) (*dns.Msg, netip.Addr, error) {
+func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uint16, depth int, logw io.Writer) (*dns.Msg, netip.Addr, error) {
 	if depth > r.maxChase {
 		return nil, netip.Addr{}, fmt.Errorf("cname/dname chain too deep (> %d)", r.maxChase)
 	}
@@ -102,7 +103,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 	for i := len(labels) - 1; i >= 0; i-- {
 		zone := dns.Fqdn(strings.Join(labels[i:], "."))
 
-		nsSet, nextSrv, resp, err := r.queryForDelegation(ctx, zone, servers, qname)
+		nsSet, nextSrv, resp, err := r.queryForDelegation(ctx, zone, servers, qname, logw)
 		if err != nil {
 			return nil, netip.Addr{}, err
 		}
@@ -112,7 +113,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 			if len(targetServers) == 0 {
 				targetServers = servers
 			}
-			return r.queryFinal(ctx, qname, qtype, targetServers, depth, resp)
+			return r.queryFinal(ctx, qname, qtype, targetServers, depth, resp, logw)
 		}
 
 		if len(nsSet) == 0 {
@@ -120,13 +121,13 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 				if zone == qname {
 					return r.handleTerminal(zone, resp)
 				}
-				return r.queryFinal(ctx, qname, qtype, servers, depth, resp)
+				return r.queryFinal(ctx, qname, qtype, servers, depth, resp, logw)
 			}
 			continue
 		}
 		servers = nextSrv
 	}
-	return r.queryFinal(ctx, qname, qtype, servers, depth, nil)
+	return r.queryFinal(ctx, qname, qtype, servers, depth, nil, logw)
 }
 
 // -------- Core steps ---------
@@ -134,7 +135,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 // queryForDelegation performs the QMIN step at `zone` against `parentServers`.
 // If servers REFUSE/NOTIMP the minimized NS query, retry with non-QMIN (ask NS for the full qname).
 // Returns: (nsOwnerNames, resolvedServerAddrs, lastResponse, error)
-func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentServers []netip.Addr, fullQname string) ([]string, []netip.Addr, *dns.Msg, error) {
+func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentServers []netip.Addr, fullQname string, logw io.Writer) ([]string, []netip.Addr, *dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(zone, dns.TypeNS)
 	m.RecursionDesired = false
@@ -143,7 +144,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 	var last *dns.Msg
 	refusedSeen := false
 	for _, svr := range shuffle(parentServers) {
-		resp, err := r.exchange(ctx, m, svr)
+		resp, err := r.exchange(ctx, m, svr, logw)
 		if err != nil {
 			continue
 		}
@@ -174,7 +175,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 		}
 		addrs := glueAddresses(resp)
 		if len(addrs) == 0 {
-			addrs = r.resolveNSAddrs(ctx, nsOwners)
+			addrs = r.resolveNSAddrs(ctx, nsOwners, logw)
 		}
 		if len(addrs) > 0 {
 			return nsOwners, addrs, resp, nil
@@ -187,7 +188,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 		m2.RecursionDesired = false
 		setEDNS(m2)
 		for _, svr := range shuffle(parentServers) {
-			resp, err := r.exchange(ctx, m2, svr)
+			resp, err := r.exchange(ctx, m2, svr, logw)
 			if err != nil {
 				continue
 			}
@@ -204,7 +205,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 			}
 			addrs := glueAddresses(resp)
 			if len(addrs) == 0 {
-				addrs = r.resolveNSAddrs(ctx, nsOwners)
+				addrs = r.resolveNSAddrs(ctx, nsOwners, logw)
 			}
 			if len(addrs) > 0 {
 				return nsOwners, addrs, resp, nil
@@ -220,7 +221,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 
 // queryFinal asks the authoritative (or closest) servers for the target qname/qtype.
 // It also performs CNAME/DNAME chasing, with a loop bound controlled by depth.
-func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []netip.Addr, depth int, parentResp *dns.Msg) (*dns.Msg, netip.Addr, error) {
+func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []netip.Addr, depth int, parentResp *dns.Msg, logw io.Writer) (*dns.Msg, netip.Addr, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
 	m.RecursionDesired = false
@@ -229,7 +230,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 	var last *dns.Msg
 	var lastServer netip.Addr
 	for _, svr := range shuffle(authServers) {
-		resp, err := r.exchange(ctx, m, svr)
+		resp, err := r.exchange(ctx, m, svr, logw)
 		if err != nil {
 			continue
 		}
@@ -243,7 +244,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 			}
 
 			if tgt, ok := cnameTarget(resp, qname); ok {
-				msg, origin, err := r.resolveWithDepth(ctx, tgt, qtype, depth+1)
+				msg, origin, err := r.resolveWithDepth(ctx, tgt, qtype, depth+1, logw)
 				if err != nil {
 					return nil, netip.Addr{}, err
 				}
@@ -252,7 +253,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 			}
 
 			if tgt, ok := dnameSynthesize(resp, qname); ok {
-				msg, origin, err := r.resolveWithDepth(ctx, tgt, qtype, depth+1)
+				msg, origin, err := r.resolveWithDepth(ctx, tgt, qtype, depth+1, logw)
 				if err != nil {
 					return nil, netip.Addr{}, err
 				}
@@ -298,21 +299,25 @@ func (r *Resolver) handleTerminal(zone string, resp *dns.Msg) (*dns.Msg, netip.A
 
 // -------- Transport & helpers ---------
 
-func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server netip.Addr) (resp *dns.Msg, err error) {
-	if r.usingUDP() {
-		if resp, err = r.exchangeWithNetwork(ctx, "udp", m, server); err != nil {
-			if r.maybeDisableUdp(err) {
-				err = nil
+func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server netip.Addr, logw io.Writer) (resp *dns.Msg, err error) {
+	if !server.Is6() || r.usingIPv6() {
+		if r.usingUDP() {
+			if resp, err = r.exchangeWithNetwork(ctx, "udp", m, server, logw); err != nil {
+				if r.maybeDisableUdp(err) {
+					err = nil
+				}
 			}
 		}
-	}
-	if err == nil && (resp == nil || resp.Truncated) {
-		resp, err = r.exchangeWithNetwork(ctx, "tcp", m, server)
+		if err == nil && (resp == nil || resp.Truncated) {
+			resp, err = r.exchangeWithNetwork(ctx, "tcp", m, server, logw)
+		}
+	} else {
+		err = net.ErrClosed
 	}
 	return
 }
 
-func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *dns.Msg, server netip.Addr) (resp *dns.Msg, err error) {
+func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *dns.Msg, server netip.Addr, logw io.Writer) (resp *dns.Msg, err error) {
 	var dnsConn *dns.Conn
 	if dnsConn, err = r.dialDNSConn(ctx, network, server); err == nil {
 		defer dnsConn.Close()
@@ -472,7 +477,7 @@ func dnameRecords(rrs []dns.RR, qname string) []dns.RR {
 }
 
 // resolveNSAddrs minimally resolves NS owner names to addresses by asking the roots → ...
-func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string) []netip.Addr {
+func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string, logw io.Writer) []netip.Addr {
 	var addrs []netip.Addr
 	for _, host := range nsOwners {
 		r.addrMu.RLock()
@@ -483,7 +488,7 @@ func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string) []neti
 		} else {
 			var resolved []netip.Addr
 			haveIPv4 := false
-			if msg, _, err := r.Resolve(ctx, host, dns.TypeA); err == nil {
+			if msg, _, err := r.Resolve(ctx, host, dns.TypeA, logw); err == nil {
 				for _, rr := range msg.Answer {
 					if a, ok := rr.(*dns.A); ok {
 						if addr, ok := ipToAddr(a.A); ok {
@@ -494,7 +499,7 @@ func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string) []neti
 				}
 			}
 			if !haveIPv4 {
-				if msg, _, err := r.Resolve(ctx, host, dns.TypeAAAA); err == nil {
+				if msg, _, err := r.Resolve(ctx, host, dns.TypeAAAA, logw); err == nil {
 					for _, rr := range msg.Answer {
 						if a, ok := rr.(*dns.AAAA); ok {
 							if addr, ok := ipToAddr(a.AAAA); ok {
