@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-// OrderRoots sorts the root server list by their current latency and removes those that don't respond.
-func (r *Resolver) OrderRoots(ctx context.Context) {
+// OrderRoots sorts the root server list by their current latency and removes those that don't respond within cutoff.
+func (r *Resolver) OrderRoots(ctx context.Context, cutoff time.Duration) {
 	if _, ok := ctx.Deadline(); !ok {
-		newctx, cancel := context.WithTimeout(ctx, r.Timeout)
+		newctx, cancel := context.WithTimeout(ctx, cutoff*2)
 		defer cancel()
 		ctx = newctx
 	}
@@ -31,7 +31,7 @@ func (r *Resolver) OrderRoots(ctx context.Context) {
 	useIPv4 := false
 	useIPv6 := false
 	for _, rt := range l {
-		if rt.rtt < time.Minute {
+		if rt.rtt <= cutoff {
 			useIPv4 = useIPv4 || rt.addr.Is4()
 			useIPv6 = useIPv6 || rt.addr.Is6()
 			newRootServers = append(newRootServers, rt.addr)
