@@ -57,6 +57,7 @@ type Resolver struct {
 	mu          sync.RWMutex // protects following
 	useIPv4     bool
 	useIPv6     bool
+	useUDP      bool
 	rootServers []netip.Addr
 }
 
@@ -91,6 +92,7 @@ func New() (r *Resolver) {
 		addrCache:     make(map[string][]string),
 		useIPv4:       len(Roots4) > 0,
 		useIPv6:       len(Roots6) > 0,
+		useUDP:        true,
 		rootServers:   rootAddrs,
 	}
 }
@@ -338,61 +340,44 @@ func (r *Resolver) handleTerminal(zone string, resp *dns.Msg) (*Result, error) {
 
 // -------- Transport & helpers ---------
 
-func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server string) (*dns.Msg, error) {
-	resp, err := r.exchangeWithNetwork(ctx, "udp", m, server)
-	if err != nil {
-		return nil, err
+func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server string) (resp *dns.Msg, err error) {
+	if r.usingUDP() {
+		if resp, err = r.exchangeWithNetwork(ctx, "udp", m, server); err != nil {
+			if r.maybeDisableUdp(err) {
+				err = nil
+			}
+		}
 	}
-	if resp.Truncated {
-		return r.exchangeWithNetwork(ctx, "tcp", m, server)
+	if err == nil && (resp == nil || resp.Truncated) {
+		resp, err = r.exchangeWithNetwork(ctx, "tcp", m, server)
 	}
-	return resp, nil
+	return
 }
 
-func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *dns.Msg, server string) (*dns.Msg, error) {
-	conn, err := r.dialDNSConn(ctx, network, server)
-	if err != nil {
-		return nil, err
+func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *dns.Msg, server string) (resp *dns.Msg, err error) {
+	var dnsConn *dns.Conn
+	if dnsConn, err = r.dialDNSConn(ctx, network, server); err == nil {
+		defer dnsConn.Close()
+		deadline := r.deadline(ctx)
+		if !deadline.IsZero() {
+			_ = dnsConn.SetDeadline(deadline)
+		}
+		if err = dnsConn.WriteMsg(m); err == nil {
+			resp, err = dnsConn.ReadMsg()
+		}
 	}
-	defer conn.Close()
-
-	deadline := r.deadline(ctx)
-	if !deadline.IsZero() {
-		_ = conn.SetDeadline(deadline)
-	}
-
-	if err = conn.WriteMsg(m); err != nil {
-		return nil, err
-	}
-
-	if !deadline.IsZero() {
-		_ = conn.SetReadDeadline(deadline)
-	}
-
-	resp, err := conn.ReadMsg()
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
+	return
 }
 
-func (r *Resolver) dialDNSConn(ctx context.Context, network, server string) (*dns.Conn, error) {
-	dialer := r.ContextDialer
-	if dialer == nil {
-		dialer = &net.Dialer{}
+func (r *Resolver) dialDNSConn(ctx context.Context, network, server string) (dnsConn *dns.Conn, err error) {
+	var rawConn net.Conn
+	if rawConn, err = r.DialContext(ctx, network, server); err == nil {
+		dnsConn = &dns.Conn{Conn: rawConn}
+		if strings.HasPrefix(network, "udp") {
+			dnsConn.UDPSize = dns.DefaultMsgSize
+		}
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	rawConn, err := dialer.DialContext(ctx, network, server)
-	if err != nil {
-		return nil, err
-	}
-	dnsConn := &dns.Conn{Conn: rawConn}
-	if strings.HasPrefix(network, "udp") {
-		dnsConn.UDPSize = dns.DefaultMsgSize
-	}
-	return dnsConn, nil
+	return
 }
 
 func (r *Resolver) deadline(ctx context.Context) time.Time {
