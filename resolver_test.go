@@ -10,6 +10,7 @@ import (
 )
 
 func Test_A_console_aws_amazon_com(t *testing.T) {
+	t.Parallel()
 	/*
 		This domain tests that CNAME chains are followed.
 	*/
@@ -74,6 +75,7 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 }
 
 func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
+	t.Parallel()
 	/*
 		This domain tests that QNAME minimization works.
 	*/
@@ -107,6 +109,7 @@ func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
 }
 
 func Test_NS_bankgirot_nu(t *testing.T) {
+	t.Parallel()
 	/*
 	   This domain has delegation servers that do not respond.
 	   We expect the final queries to time out, but since we
