@@ -17,11 +17,11 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 	r := New()
 	r.OrderRoots(t.Context())
 	qname := dns.Fqdn("console.aws.amazon.com")
-	result, err := r.Resolve(t.Context(), qname, dns.TypeA)
+	msg, _, err := r.Resolve(t.Context(), qname, dns.TypeA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if x := result.RCODE; x != dns.RcodeSuccess {
+	if x := msg.Rcode; x != dns.RcodeSuccess {
 		t.Error(dns.RcodeToString[x])
 	}
 	travelled := make(map[string]struct{})
@@ -31,7 +31,7 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 	searching = true
 	for searching {
 		var foundCNAME bool
-		for _, rr := range result.Answers {
+		for _, rr := range msg.Answer {
 			var cname *dns.CNAME
 			var ok bool
 			if cname, ok = rr.(*dns.CNAME); ok {
@@ -50,11 +50,11 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 		}
 		if foundCNAME {
 			chainLength++
-			if chainLength > len(result.Answers) {
+			if chainLength > len(msg.Answer) {
 				t.Fatalf("cname chain exceeded answers for %s", qname)
 			}
 		} else {
-			for _, rr := range result.Answers {
+			for _, rr := range msg.Answer {
 				var arecord *dns.A
 				var ok bool
 				if arecord, ok = rr.(*dns.A); ok {
@@ -84,18 +84,18 @@ func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
 	qname := dns.Fqdn("qnamemintest.internet.nl")
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	result, err := r.Resolve(ctx, qname, dns.TypeTXT)
+	msg, _, err := r.Resolve(ctx, qname, dns.TypeTXT)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if x := result.RCODE; x != dns.RcodeSuccess {
+	if x := msg.Rcode; x != dns.RcodeSuccess {
 		t.Error(dns.RcodeToString[x])
 	}
-	if x := len(result.Answers); x < 1 {
+	if x := len(msg.Answer); x < 1 {
 		t.Fatal(x)
 	}
 	found := false
-	for _, rr := range result.Answers {
+	for _, rr := range msg.Answer {
 		if rr, ok := rr.(*dns.TXT); ok {
 			for _, txt := range rr.Txt {
 				found = found || strings.HasPrefix(txt, "HOORAY")
@@ -104,7 +104,7 @@ func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected a TXT record starting with HOORAY")
-		t.Log(result.Answers)
+		t.Log(msg.Answer)
 	}
 }
 
@@ -127,17 +127,17 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 	qname := dns.Fqdn("bankgirot.nu")
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	result, err := r.Resolve(ctx, qname, dns.TypeNS)
+	msg, _, err := r.Resolve(ctx, qname, dns.TypeNS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.RCODE == dns.RcodeNameError {
+	if msg.Rcode == dns.RcodeNameError {
 		t.Skip(qname, "no longer exists")
 	}
-	if x := result.RCODE; x != dns.RcodeSuccess {
+	if x := msg.Rcode; x != dns.RcodeSuccess {
 		t.Error(dns.RcodeToString[x])
 	}
-	if x := len(result.Answers); x < 1 {
+	if x := len(msg.Answer); x < 1 {
 		t.Fatal(x)
 	}
 	expect := map[string]struct{}{
@@ -145,7 +145,7 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 		"sem2.eun.net.": {},
 		"sem3.eun.net.": {},
 	}
-	for _, rr := range result.Answers {
+	for _, rr := range msg.Answer {
 		ns, ok := rr.(*dns.NS)
 		if !ok {
 			t.Fatalf("unexpected rr type %T", rr)

@@ -9,18 +9,22 @@ import (
 )
 
 func Resolve(ctx context.Context, r *resolver.Resolver, name string, qtype uint16) error {
-	res, err := r.Resolve(ctx, name, qtype)
+	msg, server, err := r.Resolve(ctx, name, qtype)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("RCODE=%s from %s", dns.RcodeToString[res.RCODE], res.Server)
-	for _, rr := range res.Answers {
+	fmt.Printf("RCODE=%s", dns.RcodeToString[msg.Rcode])
+	if server.IsValid() {
+		fmt.Printf(" from %s", server)
+	}
+	fmt.Println()
+	for _, rr := range msg.Answer {
 		fmt.Println(rr)
 	}
-	for _, rr := range res.Authority {
+	for _, rr := range msg.Ns {
 		fmt.Println("AUTH:", rr)
 	}
-	for _, rr := range res.Additional {
+	for _, rr := range msg.Extra {
 		fmt.Println("EXTRA:", rr)
 	}
 	return nil
