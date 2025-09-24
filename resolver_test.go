@@ -18,8 +18,7 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 	}
 	var chainOwner string
 	chainOwner = dns.Fqdn("console.aws.amazon.com")
-	var travelled map[string]struct{}
-	travelled = make(map[string]struct{})
+	travelled := make(map[string]struct{})
 	var chainLength int
 	var haveA bool
 	var searching bool
