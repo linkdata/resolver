@@ -227,7 +227,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 				addrs = r.resolveNSAddrs(ctx, nsOwners, logw)
 			}
 			if len(addrs) > 0 {
-				logf(logw, "delegation returning zone=%s addrs=%d", zone, len(addrs))
+				logf(logw, "delegation returning zone=%s addrs=%d", fullQname, len(addrs))
 				return nsOwners, addrs, resp, nil
 			}
 		}
@@ -332,24 +332,18 @@ func (r *Resolver) handleTerminal(zone string, resp *dns.Msg, logw io.Writer) (*
 // -------- Transport & helpers ---------
 
 func (r *Resolver) exchange(ctx context.Context, m *dns.Msg, server netip.Addr, logw io.Writer) (resp *dns.Msg, err error) {
-	serverStr := r.addrPort(server).String()
 	if server.Is6() && !r.usingIPv6() {
-		logf(logw, "exchange skip IPv6 server=%s", serverStr)
+		logf(logw, "SKIP      %s: @%s IPv6 disabled", formatProto("udp", server), server.String())
 		return nil, net.ErrClosed
 	}
 	if r.usingUDP() {
-		logf(logw, "exchange udp server=%s", serverStr)
 		if resp, err = r.exchangeWithNetwork(ctx, "udp", m, server, logw); err != nil {
 			if r.maybeDisableUdp(err) {
 				err = nil
 			}
-			if err != nil {
-				logf(logw, "exchange udp error server=%s err=%v", serverStr, err)
-			}
 		}
 	}
 	if err == nil && (resp == nil || resp.Truncated) {
-		logf(logw, "exchange tcp server=%s trigger=%v", serverStr, resp != nil && resp.Truncated)
 		resp, err = r.exchangeWithNetwork(ctx, "tcp", m, server, logw)
 	}
 	return
@@ -363,12 +357,18 @@ func (r *Resolver) exchangeWithNetwork(ctx context.Context, network string, m *d
 		if !deadline.IsZero() {
 			_ = dnsConn.SetDeadline(deadline)
 		}
+		var question dns.Question
+		if len(m.Question) > 0 {
+			question = m.Question[0]
+			logQuerySend(logw, network, server, question)
+		}
+		start := time.Now()
 		if err = dnsConn.WriteMsg(m); err == nil {
 			resp, err = dnsConn.ReadMsg()
+			if err == nil && len(m.Question) > 0 {
+				logQueryReceive(logw, network, server, question, resp, time.Since(start))
+			}
 		}
-	}
-	if err != nil {
-		logf(logw, "exchange network=%s server=%s err=%v", network, r.addrPort(server), err)
 	}
 	return
 }
@@ -385,7 +385,7 @@ func (r *Resolver) dialDNSConn(ctx context.Context, network string, server netip
 		r.maybeDisableIPv6(err)
 	}
 	if err != nil {
-		logf(logw, "dial error network=%s server=%s err=%v", network, addrPort, err)
+		logf(logw, "DIAL FAIL %s: @%s err=%v", formatProto(network, server), server.String(), err)
 	}
 	return
 }
@@ -641,6 +641,59 @@ func logf(logw io.Writer, format string, args ...any) {
 	if logw != nil {
 		_, _ = fmt.Fprintf(logw, format+"\n", args...)
 	}
+}
+
+func formatProto(network string, addr netip.Addr) string {
+	proto := network
+	if addr.Is4() {
+		return proto + "4"
+	}
+	if addr.Is6() {
+		return proto + "6"
+	}
+	return proto
+}
+
+func logQuerySend(logw io.Writer, network string, addr netip.Addr, q dns.Question) {
+	if logw == nil {
+		return
+	}
+	logf(logw, "SENDING  %s: @%s %s %q", formatProto(network, addr), addr.String(), typeName(q.Qtype), q.Name)
+}
+
+func logQueryReceive(logw io.Writer, network string, addr netip.Addr, q dns.Question, resp *dns.Msg, dur time.Duration) {
+	if logw != nil && resp != nil {
+		var authflag string
+		if resp.Authoritative {
+			authflag = " AUTH"
+		}
+		logf(logw, "RECEIVED %s: @%s %s %q => %s [%s] (%s, %d bytes%s)",
+			formatProto(network, addr),
+			addr.String(),
+			typeName(q.Qtype),
+			q.Name,
+			dns.RcodeToString[resp.Rcode],
+			formatCounts(resp),
+			formatDuration(dur),
+			resp.Len(),
+			authflag,
+		)
+	}
+}
+
+func formatCounts(msg *dns.Msg) string {
+	return fmt.Sprintf("%d+%d+%d A/N/E", len(msg.Answer), len(msg.Ns), len(msg.Extra))
+}
+
+func formatDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0ms"
+	}
+	ms := d.Milliseconds()
+	if ms == 0 {
+		return "<1ms"
+	}
+	return fmt.Sprintf("%dms", ms)
 }
 
 // -------- CNAME/DNAME helpers ---------
