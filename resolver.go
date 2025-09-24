@@ -248,12 +248,38 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 
 			// CNAME chase: if owner has CNAME, follow it.
 			if tgt, ok := cnameTarget(resp, qname); ok {
-				return r.resolveWithDepth(ctx, tgt, qtype, depth+1)
+				var res *Result
+				var chaseErr error
+				res, chaseErr = r.resolveWithDepth(ctx, tgt, qtype, depth+1)
+				if chaseErr == nil {
+					res.Answers = append(cnameChainRecords(resp.Answer, qname), res.Answers...)
+					if len(resp.Ns) > 0 {
+						res.Authority = resp.Ns
+					}
+					if len(resp.Extra) > 0 {
+						res.Additional = append(resp.Extra, res.Additional...)
+					}
+					return res, nil
+				}
+				return nil, chaseErr
 			}
 
 			// DNAME chase: synthesize target and follow.
 			if tgt, ok := dnameSynthesize(resp, qname); ok {
-				return r.resolveWithDepth(ctx, tgt, qtype, depth+1)
+				var res *Result
+				var chaseErr error
+				res, chaseErr = r.resolveWithDepth(ctx, tgt, qtype, depth+1)
+				if chaseErr == nil {
+					res.Answers = append(dnameRecords(resp.Answer, qname), res.Answers...)
+					if len(resp.Ns) > 0 {
+						res.Authority = resp.Ns
+					}
+					if len(resp.Extra) > 0 {
+						res.Additional = append(resp.Extra, res.Additional...)
+					}
+					return res, nil
+				}
+				return nil, chaseErr
 			}
 
 			// NODATA? If SOA present, negative-cache and return.
@@ -388,6 +414,35 @@ func extractSOA(m *dns.Msg) *dns.SOA {
 		}
 	}
 	return nil
+}
+
+func cnameChainRecords(rrs []dns.RR, owner string) []dns.RR {
+	var out []dns.RR
+	for _, rr := range rrs {
+		if cname, ok := rr.(*dns.CNAME); ok {
+			if strings.EqualFold(cname.Hdr.Name, owner) {
+				out = append(out, rr)
+			}
+		}
+	}
+	return out
+}
+
+func dnameRecords(rrs []dns.RR, qname string) []dns.RR {
+	var out []dns.RR
+	for _, rr := range rrs {
+		if d, ok := rr.(*dns.DNAME); ok {
+			if strings.HasSuffix(strings.ToLower(qname), strings.ToLower(d.Hdr.Name)) {
+				out = append(out, rr)
+			}
+		}
+		if cname, ok := rr.(*dns.CNAME); ok {
+			if strings.EqualFold(cname.Hdr.Name, qname) {
+				out = append(out, rr)
+			}
+		}
+	}
+	return out
 }
 
 // resolveNSAddrs minimally resolves NS owner names to addresses by asking the roots → ...
