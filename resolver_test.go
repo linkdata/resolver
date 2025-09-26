@@ -210,14 +210,15 @@ func TestResolverCacheStoreAndGet(t *testing.T) {
 	if !cached.Zero {
 		t.Fatal("cached response must have Zero bit set")
 	}
-	originalQuestion := cached.Question[0].Name
-	cached.Question[0].Name = "mutated.example.com."
 	cachedAgain := cacheGet(qname, qtype, cacher)
 	if cachedAgain == nil {
 		t.Fatal("expected cached response on second lookup")
 	}
-	if cachedAgain.Question[0].Name != originalQuestion {
-		t.Fatalf("cache returned mutated question got=%s want=%s", cachedAgain.Question[0].Name, originalQuestion)
+	if cachedAgain != cached {
+		t.Fatalf("expected cache to return the same message pointer got=%p want=%p", cachedAgain, cached)
+	}
+	if cachedAgain.Question[0].Name != qname {
+		t.Fatalf("cached question changed got=%s want=%s", cachedAgain.Question[0].Name, qname)
 	}
 }
 
@@ -265,13 +266,15 @@ func TestResolverResolveUsesProvidedCache(t *testing.T) {
 	if !msg.Zero {
 		t.Fatal("expected cached result to keep zero bit set")
 	}
+	if msg != override.msg {
+		t.Fatalf("resolver returned unexpected message pointer got=%p want=%p", msg, override.msg)
+	}
 	if x := override.getCount; x != 1 {
 		t.Fatalf("override cache get count got=%d want=1", x)
 	}
 	if x := override.setCount; x != 0 {
 		t.Fatalf("override cache set count got=%d want=0", x)
 	}
-	msg.Question[0].Name = "mutated.example.com."
 	if override.msg.Question[0].Name != originalQuestion {
 		t.Fatalf("override cache msg mutated got=%s want=%s", override.msg.Question[0].Name, originalQuestion)
 	}
@@ -297,6 +300,32 @@ func TestResolverCacheHelpersNilCache(t *testing.T) {
 	}
 	if cached := cacheGet(qname, qtype, nil); cached != nil {
 		t.Fatalf("cacheGet should return nil without cache, got %v", cached)
+	}
+}
+
+func TestCloneIfCached(t *testing.T) {
+	t.Parallel()
+	original := newResponseMsg(dns.Fqdn("clone-cache.example."), dns.TypeA, dns.RcodeSuccess, nil, nil, nil)
+	original.Zero = true
+	cloned := cloneIfCached(original)
+	if cloned == nil {
+		t.Fatal("expected clone for cached message")
+	}
+	if cloned == original {
+		t.Fatal("cloneIfCached should return a new message when Zero is set")
+	}
+	if cloned.Zero {
+		t.Fatal("clone should clear Zero bit for new message")
+	}
+	cloneQuestion := "mutated.clone-cache.example."
+	cloned.Question[0].Name = cloneQuestion
+	if original.Question[0].Name == cloneQuestion {
+		t.Fatal("cloneIfCached mutated original message")
+	}
+	fresh := newResponseMsg(dns.Fqdn("fresh.example."), dns.TypeA, dns.RcodeSuccess, nil, nil, nil)
+	freshClone := cloneIfCached(fresh)
+	if freshClone != fresh {
+		t.Fatal("cloneIfCached should return original when Zero is not set")
 	}
 }
 

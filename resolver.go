@@ -274,6 +274,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 				if err != nil {
 					return nil, netip.Addr{}, err
 				}
+				msg = cloneIfCached(msg)
 				prependRecords(msg, resp, qname, cnameChainRecords)
 				r.cacheStore(msg, cache)
 				return msg, origin, nil
@@ -285,6 +286,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 				if err != nil {
 					return nil, netip.Addr{}, err
 				}
+				msg = cloneIfCached(msg)
 				prependRecords(msg, resp, qname, dnameRecords)
 				r.cacheStore(msg, cache)
 				return msg, origin, nil
@@ -744,11 +746,22 @@ func (r *Resolver) cacheStore(msg *dns.Msg, cache Cacher) (cached bool) {
 	return
 }
 
+func cloneIfCached(msg *dns.Msg) (clone *dns.Msg) {
+	clone = msg
+	if msg != nil {
+		if msg.Zero {
+			clone = msg.Copy()
+			if clone != nil {
+				clone.Zero = false
+			}
+		}
+	}
+	return
+}
+
 func cacheGet(name string, qtype uint16, cache Cacher) (msg *dns.Msg) {
 	if cache != nil {
-		if msg = cache.DnsGet(name, qtype); msg != nil {
-			msg = msg.Copy()
-		}
+		msg = cache.DnsGet(name, qtype)
 	}
 	return
 }
