@@ -34,7 +34,7 @@ var flag6 = flag.Bool("6", false, "use IPv6")
 
 func recordFn(_ *resolver.Service, nsaddr netip.Addr, qtype uint16, qname string, m *dns.Msg, err error) {
 	fmt.Println("\n;;; ----------------------------------------------------------------------")
-	fmt.Printf("; <<>> recursive <<>> @%s %s %s\n", nsaddr, dns.Type(qtype), qname)
+	fmt.Printf("; <<>> resolver <<>> @%s %s %s\n", nsaddr, dns.Type(qtype), qname)
 	if m == nil && err != nil {
 		m = new(dns.Msg)
 		m.SetQuestion(qname, qtype)
@@ -136,9 +136,7 @@ func main() {
 		}
 	}
 
-	if !*flagRecord {
-		fmt.Printf("\n;;; CACHE: size %d, hit ratio %.2f%%\n", resolver.DefaultCache.Entries(), resolver.DefaultCache.HitRatio())
-	}
+	fmt.Printf(";;; CACHE: size %d, hit ratio %.2f%%\n", resolver.DefaultCache.Entries(), resolver.DefaultCache.HitRatio())
 
 	if *flagMemprofile != "" {
 		f, err := os.Create(*flagMemprofile)
