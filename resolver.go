@@ -87,19 +87,21 @@ func (r *Resolver) SetCache(c Cacher) {
 }
 
 // Resolve performs iterative resolution with QNAME minimization for qname/qtype.
-func (r *Resolver) Resolve(ctx context.Context, qname string, qtype uint16, logw io.Writer) (*dns.Msg, netip.Addr, error) {
-	logCtx := logContext{writer: logw, start: time.Now()}
+func (r *Resolver) Resolve(ctx context.Context, qname string, qtype uint16, logw io.Writer, cache Cacher) (msg *dns.Msg, origin netip.Addr, err error) {
+	var logCtx logContext
+	logCtx = logContext{writer: logw, start: time.Now()}
 	logf(logCtx, 0, "resolve start qname=%s qtype=%s", qname, typeName(qtype))
-	return r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(qname)), qtype, 0, logCtx)
+	msg, origin, err = r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(qname)), qtype, 0, logCtx, cache)
+	return
 }
 
 // resolveWithDepth is Resolve plus a chase-depth counter to avoid infinite loops.
-func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uint16, depth int, log logContext) (*dns.Msg, netip.Addr, error) {
+func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uint16, depth int, log logContext, cache Cacher) (*dns.Msg, netip.Addr, error) {
 	logf(log, depth, "resolve depth qname=%s qtype=%s", qname, typeName(qtype))
 	if depth > r.maxChase {
 		return nil, netip.Addr{}, errCNAMEChainTooDeep{limit: r.maxChase}
 	}
-	if cached := r.cacheGet(qname, qtype); cached != nil {
+	if cached := r.cacheGet(qname, qtype, cache); cached != nil {
 		logf(log, depth, "cache hit qname=%s qtype=%s", qname, typeName(qtype))
 		return cached, netip.Addr{}, nil
 	}
@@ -110,7 +112,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 	// Walk down: "." -> "com." -> "example.com."
 	for i := len(labels) - 1; i >= 0; i-- {
 		zone := dns.Fqdn(strings.Join(labels[i:], "."))
-		nsSet, nextSrv, resp, err := r.queryForDelegation(ctx, zone, servers, qname, log, depth)
+		nsSet, nextSrv, resp, err := r.queryForDelegation(ctx, zone, servers, qname, log, depth, cache)
 		if err != nil {
 			logf(log, depth, "delegation error zone=%s err=%v", zone, err)
 			return nil, netip.Addr{}, err
@@ -121,23 +123,23 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 			if len(targetServers) == 0 {
 				targetServers = servers
 			}
-			return r.queryFinal(ctx, qname, qtype, targetServers, depth, resp, log)
+			return r.queryFinal(ctx, qname, qtype, targetServers, depth, resp, log, cache)
 		}
 
 		if len(nsSet) == 0 {
 			if resp != nil && resp.Rcode == dns.RcodeNameError {
 				if zone == qname {
-					return r.handleTerminal(zone, resp, depth, log)
+					return r.handleTerminal(zone, resp, depth, log, cache)
 				}
 				logf(log, depth, "delegation NXDOMAIN zone=%s continuing", zone)
-				return r.queryFinal(ctx, qname, qtype, servers, depth, resp, log)
+				return r.queryFinal(ctx, qname, qtype, servers, depth, resp, log, cache)
 			}
 			logf(log, depth, "delegation empty ns zone=%s", zone)
 			continue
 		}
 		servers = nextSrv
 	}
-	return r.queryFinal(ctx, qname, qtype, servers, depth, nil, log)
+	return r.queryFinal(ctx, qname, qtype, servers, depth, nil, log, cache)
 }
 
 // -------- Core steps ---------
@@ -145,7 +147,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 // queryForDelegation performs the QMIN step at `zone` against `parentServers`.
 // If servers REFUSE/NOTIMP the minimized NS query, retry with non-QMIN (ask NS for the full qname).
 // Returns: (nsOwnerNames, resolvedServerAddrs, lastResponse, error)
-func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentServers []netip.Addr, fullQname string, log logContext, depth int) ([]string, []netip.Addr, *dns.Msg, error) {
+func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentServers []netip.Addr, fullQname string, log logContext, depth int, cache Cacher) ([]string, []netip.Addr, *dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(zone, dns.TypeNS)
 	m.RecursionDesired = false
@@ -172,7 +174,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 			continue
 		}
 		if resp.Rcode == dns.RcodeNameError { // NXDOMAIN at parent ⇒ bubble up
-			if r.cacheStore(resp) {
+			if r.cacheStore(resp, cache) {
 				logf(log, depth+1, "delegation cached response zone=%s", zone)
 			}
 			return nil, nil, resp, nil
@@ -181,7 +183,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 		nsOwners := extractDelegationNS(resp, zone)
 		if len(nsOwners) == 0 {
 			if resp.Rcode == dns.RcodeNameError {
-				if r.cacheStore(resp) {
+				if r.cacheStore(resp, cache) {
 					logf(log, depth+1, "delegation cached response zone=%s", zone)
 				}
 				return nil, nil, resp, nil
@@ -190,7 +192,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 		}
 		addrs := glueAddresses(resp)
 		if len(addrs) == 0 {
-			addrs = r.resolveNSAddrs(ctx, nsOwners, depth+2, log)
+			addrs = r.resolveNSAddrs(ctx, nsOwners, depth+2, log, cache)
 		}
 		if len(addrs) > 0 {
 			return nsOwners, addrs, resp, nil
@@ -217,7 +219,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 			last = resp
 			logf(log, depth+1, "delegation fallback response full=%s server=%s rcode=%s", fullQname, serverStr, dns.RcodeToString[resp.Rcode])
 			if resp.Rcode == dns.RcodeNameError {
-				if r.cacheStore(resp) {
+				if r.cacheStore(resp, cache) {
 					logf(log, depth+1, "delegation cached response zone=%s", fullQname)
 				}
 				return nil, nil, resp, nil
@@ -228,7 +230,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 			}
 			addrs := glueAddresses(resp)
 			if len(addrs) == 0 {
-				addrs = r.resolveNSAddrs(ctx, nsOwners, depth+2, log)
+				addrs = r.resolveNSAddrs(ctx, nsOwners, depth+2, log, cache)
 			}
 			if len(addrs) > 0 {
 				logf(log, depth+1, "delegation returning zone=%s addrs=%d", fullQname, len(addrs))
@@ -251,7 +253,7 @@ func (r *Resolver) usable(protocol string, addr netip.Addr) (yes bool) {
 
 // queryFinal asks the authoritative (or closest) servers for the target qname/qtype.
 // It also performs CNAME/DNAME chasing, with a loop bound controlled by depth.
-func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []netip.Addr, depth int, parentResp *dns.Msg, log logContext) (*dns.Msg, netip.Addr, error) {
+func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, authServers []netip.Addr, depth int, parentResp *dns.Msg, log logContext, cache Cacher) (*dns.Msg, netip.Addr, error) {
 	logf(log, depth, "final query qname=%s qtype=%s servers=%d", qname, typeName(qtype), len(authServers))
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
@@ -273,39 +275,39 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 			logf(log, depth+1, "final success partial qname=%s server=%s", qname, r.addrPort(svr))
 			if hasRRType(resp.Answer, qtype) {
 				logf(log, depth+1, "final returning answer qname=%s server=%s", qname, r.addrPort(svr))
-				r.cacheStore(resp)
+				r.cacheStore(resp, cache)
 				return resp, svr, nil
 			}
 
 			if tgt, ok := cnameTarget(resp, qname); ok {
 				logf(log, depth+1, "final cname qname=%s target=%s", qname, tgt)
-				msg, origin, err := r.resolveWithDepth(ctx, tgt, qtype, depth+1, log)
+				msg, origin, err := r.resolveWithDepth(ctx, tgt, qtype, depth+1, log, cache)
 				if err != nil {
 					return nil, netip.Addr{}, err
 				}
 				prependRecords(msg, resp, qname, cnameChainRecords)
-				r.cacheStore(msg)
+				r.cacheStore(msg, cache)
 				return msg, origin, nil
 			}
 
 			if tgt, ok := dnameSynthesize(resp, qname); ok {
 				logf(log, depth+1, "final dname qname=%s target=%s", qname, tgt)
-				msg, origin, err := r.resolveWithDepth(ctx, tgt, qtype, depth+1, log)
+				msg, origin, err := r.resolveWithDepth(ctx, tgt, qtype, depth+1, log, cache)
 				if err != nil {
 					return nil, netip.Addr{}, err
 				}
 				prependRecords(msg, resp, qname, dnameRecords)
-				r.cacheStore(msg)
+				r.cacheStore(msg, cache)
 				return msg, origin, nil
 			}
 
-			if r.cacheStore(resp) {
+			if r.cacheStore(resp, cache) {
 				logf(log, depth+1, "final cached soa qname=%s", qname)
 				return resp, svr, nil
 			}
 
 		case dns.RcodeNameError:
-			r.cacheStore(resp)
+			r.cacheStore(resp, cache)
 			logf(log, depth+1, "final NXDOMAIN qname=%s", qname)
 			return resp, svr, nil
 		}
@@ -317,7 +319,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 				logf(log, depth+1, "final parent delegation qname=%s count=%d", qname, len(answers))
 				parent := parentResp.Copy()
 				parent.Answer = append([]dns.RR(nil), answers...)
-				r.cacheStore(parent)
+				r.cacheStore(parent, cache)
 				return parent, netip.Addr{}, nil
 			}
 		}
@@ -325,15 +327,15 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 		return nil, netip.Addr{}, errors.New("no response from authoritative servers")
 	}
 	logf(log, depth, "final completed qname=%s server=%s rcode=%s", qname, r.addrPort(lastServer), dns.RcodeToString[last.Rcode])
-	r.cacheStore(last)
+	r.cacheStore(last, cache)
 	return last, lastServer, nil
 }
 
-func (r *Resolver) handleTerminal(zone string, resp *dns.Msg, depth int, log logContext) (*dns.Msg, netip.Addr, error) {
+func (r *Resolver) handleTerminal(zone string, resp *dns.Msg, depth int, log logContext, cache Cacher) (*dns.Msg, netip.Addr, error) {
 	if resp == nil {
 		return nil, netip.Addr{}, errors.New("terminal with no response")
 	}
-	if r.cacheStore(resp) {
+	if r.cacheStore(resp, cache) {
 		logf(log, depth, "terminal cached soa zone=%s", zone)
 	}
 	return resp, netip.Addr{}, nil
@@ -518,7 +520,7 @@ func dnameRecords(rrs []dns.RR, qname string) []dns.RR {
 }
 
 // resolveNSAddrs minimally resolves NS owner names to addresses by asking the roots → ...
-func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string, depth int, log logContext) []netip.Addr {
+func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string, depth int, log logContext, cache Cacher) []netip.Addr {
 	var addrs []netip.Addr
 	for _, host := range nsOwners {
 		r.addrMu.RLock()
@@ -530,7 +532,7 @@ func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string, depth 
 		} else {
 			var resolved []netip.Addr
 			haveIPv4 := false
-			if msg, _, err := r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(host)), dns.TypeA, depth+1, log); err == nil {
+			if msg, _, err := r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(host)), dns.TypeA, depth+1, log, cache); err == nil {
 				for _, rr := range msg.Answer {
 					if a, ok := rr.(*dns.A); ok {
 						if addr, ok := ipToAddr(a.A); ok {
@@ -541,7 +543,7 @@ func (r *Resolver) resolveNSAddrs(ctx context.Context, nsOwners []string, depth 
 				}
 			}
 			if !haveIPv4 {
-				if msg, _, err := r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(host)), dns.TypeAAAA, depth+1, log); err == nil {
+				if msg, _, err := r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(host)), dns.TypeAAAA, depth+1, log, cache); err == nil {
 					for _, rr := range msg.Answer {
 						if a, ok := rr.(*dns.AAAA); ok {
 							if addr, ok := ipToAddr(a.AAAA); ok {
@@ -743,14 +745,18 @@ func dnameSynthesize(resp *dns.Msg, qname string) (string, bool) {
 
 // -------- Cache helpers ---------
 
-func (r *Resolver) cacheStore(msg *dns.Msg) (cached bool) {
+func (r *Resolver) cacheStore(msg *dns.Msg, cache Cacher) (cached bool) {
 	if r != nil {
-		r.cacheMu.RLock()
-		cache := r.cache
-		r.cacheMu.RUnlock()
-		if cache != nil {
+		var useCache Cacher
+		useCache = cache
+		if useCache == nil {
+			r.cacheMu.RLock()
+			useCache = r.cache
+			r.cacheMu.RUnlock()
+		}
+		if useCache != nil {
 			if msg != nil && !msg.Zero && len(msg.Question) == 1 {
-				cache.DnsSet(msg)
+				useCache.DnsSet(msg)
 				cached = true
 			}
 		}
@@ -758,13 +764,17 @@ func (r *Resolver) cacheStore(msg *dns.Msg) (cached bool) {
 	return
 }
 
-func (r *Resolver) cacheGet(name string, qtype uint16) (msg *dns.Msg) {
+func (r *Resolver) cacheGet(name string, qtype uint16, cache Cacher) (msg *dns.Msg) {
 	if r != nil {
-		r.cacheMu.RLock()
-		cache := r.cache
-		r.cacheMu.RUnlock()
-		if cache != nil {
-			msg = cache.DnsGet(name, qtype)
+		var useCache Cacher
+		useCache = cache
+		if useCache == nil {
+			r.cacheMu.RLock()
+			useCache = r.cache
+			r.cacheMu.RUnlock()
+		}
+		if useCache != nil {
+			msg = useCache.DnsGet(name, qtype)
 			if msg != nil {
 				msg = msg.Copy()
 			}

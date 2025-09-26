@@ -19,7 +19,7 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 	r.OrderRoots(t.Context(), time.Millisecond*100)
 	qname := dns.Fqdn("console.aws.amazon.com")
 	qtype := dns.TypeA
-	msg, _, err := r.Resolve(t.Context(), qname, qtype, nil)
+	msg, _, err := r.Resolve(t.Context(), qname, qtype, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
 	qtype := dns.TypeTXT
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	msg, _, err := r.Resolve(ctx, qname, qtype, nil)
+	msg, _, err := r.Resolve(ctx, qname, qtype, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 	qtype := dns.TypeNS
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	msg, _, err := r.Resolve(ctx, qname, qtype, nil)
+	msg, _, err := r.Resolve(ctx, qname, qtype, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,10 +198,10 @@ func TestResolverCacheStoreAndGet(t *testing.T) {
 		A: net.IPv4(192, 0, 2, 42),
 	}
 	msg := newResponseMsg(qname, qtype, dns.RcodeSuccess, []dns.RR{answer}, nil, nil)
-	if !r.cacheStore(msg) {
+	if !r.cacheStore(msg, nil) {
 		t.Fatal("expected message to be cached")
 	}
-	cached := r.cacheGet(qname, qtype)
+	cached := r.cacheGet(qname, qtype, nil)
 	if cached == nil {
 		t.Fatalf("expected cached response for %s %s", qname, typeName(qtype))
 	}
@@ -210,7 +210,7 @@ func TestResolverCacheStoreAndGet(t *testing.T) {
 	}
 	originalQuestion := cached.Question[0].Name
 	cached.Question[0].Name = "mutated.example.com."
-	cachedAgain := r.cacheGet(qname, qtype)
+	cachedAgain := r.cacheGet(qname, qtype, nil)
 	if cachedAgain == nil {
 		t.Fatal("expected cached response on second lookup")
 	}
@@ -226,10 +226,77 @@ func TestResolverCacheSkipsZeroResponses(t *testing.T) {
 	qtype := dns.TypeA
 	msg := newResponseMsg(qname, qtype, dns.RcodeSuccess, nil, nil, nil)
 	msg.Zero = true
-	if r.cacheStore(msg) {
+	if r.cacheStore(msg, nil) {
 		t.Fatal("unexpectedly cached zero response")
 	}
-	if cached := r.cacheGet(qname, qtype); cached != nil {
+	if cached := r.cacheGet(qname, qtype, nil); cached != nil {
 		t.Fatalf("expected no cache entry, got %v", cached)
 	}
+}
+
+func TestResolverResolveUsesProvidedCache(t *testing.T) {
+	t.Parallel()
+	r := New()
+	r.SetCache(panicCacher{})
+	qname := dns.Fqdn("cached.example.com")
+	qtype := dns.TypeA
+	answer := &dns.A{
+		Hdr: dns.RR_Header{
+			Name:   qname,
+			Rrtype: qtype,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		A: net.IPv4(192, 0, 2, 25),
+	}
+	cachedMsg := newResponseMsg(qname, qtype, dns.RcodeSuccess, []dns.RR{answer}, nil, nil)
+	cachedMsg.Zero = true
+	override := &recordingCacher{msg: cachedMsg}
+	originalQuestion := override.msg.Question[0].Name
+	msg, _, err := r.Resolve(t.Context(), qname, qtype, nil, override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg == nil {
+		t.Fatal("expected message from cache override")
+	}
+	if !msg.Zero {
+		t.Fatal("expected cached result to keep zero bit set")
+	}
+	if x := override.getCount; x != 1 {
+		t.Fatalf("override cache get count got=%d want=1", x)
+	}
+	if x := override.setCount; x != 0 {
+		t.Fatalf("override cache set count got=%d want=0", x)
+	}
+	msg.Question[0].Name = "mutated.example.com."
+	if override.msg.Question[0].Name != originalQuestion {
+		t.Fatalf("override cache msg mutated got=%s want=%s", override.msg.Question[0].Name, originalQuestion)
+	}
+}
+
+type panicCacher struct{}
+
+func (panicCacher) DnsSet(*dns.Msg) {
+	panic("unexpected default cache DnsSet")
+}
+
+func (panicCacher) DnsGet(string, uint16) *dns.Msg {
+	panic("unexpected default cache DnsGet")
+}
+
+type recordingCacher struct {
+	msg      *dns.Msg
+	getCount int
+	setCount int
+}
+
+func (c *recordingCacher) DnsSet(msg *dns.Msg) {
+	c.setCount++
+	c.msg = msg
+}
+
+func (c *recordingCacher) DnsGet(string, uint16) *dns.Msg {
+	c.getCount++
+	return c.msg
 }

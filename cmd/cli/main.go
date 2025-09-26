@@ -10,7 +10,7 @@ import (
 )
 
 func Resolve(ctx context.Context, r *resolver.Resolver, name string, qtype uint16) error {
-	msg, server, err := r.Resolve(ctx, name, qtype, os.Stderr)
+	msg, server, err := r.Resolve(ctx, name, qtype, os.Stderr, nil)
 	if err == nil {
 		fmt.Println(msg)
 		fmt.Println(";; SERVER:", server.String())
