@@ -2,11 +2,10 @@ package cache
 
 import (
 	"context"
+	"math"
 	"net/netip"
 	"sync/atomic"
 	"time"
-
-	"github.com/linkdata/resolver"
 
 	"github.com/miekg/dns"
 )
@@ -15,8 +14,6 @@ const DefaultMinTTL = 10 * time.Second // ten seconds
 const DefaultMaxTTL = 6 * time.Hour    // six hours
 const DefaultNXTTL = time.Hour         // one hour
 const MaxQtype = 260
-
-var _ resolver.Cacher = (*Cache)(nil)
 
 type Cache struct {
 	MinTTL time.Duration // always cache responses for at least this long
@@ -67,7 +64,7 @@ func (cache *Cache) DnsSet(msg *dns.Msg) {
 			msg.Zero = true
 			ttl := cache.NXTTL
 			if msg.Rcode != dns.RcodeNameError {
-				ttl = max(cache.MinTTL, time.Duration(resolver.MinTTL(msg))*time.Second)
+				ttl = max(cache.MinTTL, time.Duration(minDNSMsgTTL(msg))*time.Second)
 				if qtype != dns.TypeNS || msg.Rcode != dns.RcodeSuccess {
 					ttl = min(cache.MaxTTL, ttl)
 				}
@@ -109,4 +106,31 @@ func (cache *Cache) Clean() {
 			cq.clean(now)
 		}
 	}
+}
+
+func minDNSMsgTTL(msg *dns.Msg) (minTTL int) {
+	minTTL = math.MaxInt
+	if msg != nil {
+		for _, rr := range msg.Answer {
+			if rr != nil {
+				minTTL = min(minTTL, int(rr.Header().Ttl))
+			}
+		}
+		for _, rr := range msg.Ns {
+			if rr != nil {
+				minTTL = min(minTTL, int(rr.Header().Ttl))
+			}
+		}
+		for _, rr := range msg.Extra {
+			if rr != nil {
+				if rr.Header().Rrtype != dns.TypeOPT {
+					minTTL = min(minTTL, int(rr.Header().Ttl))
+				}
+			}
+		}
+	}
+	if minTTL == math.MaxInt {
+		minTTL = -1
+	}
+	return
 }

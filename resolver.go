@@ -1,21 +1,5 @@
 // Package resolver provides a minimal iterative DNS resolver with QNAME minimization
 // using github.com/miekg/dns for wire format and transport.
-//
-// Now includes:
-//   - CNAME/DNAME chasing with loop protection.
-//   - Fallback to non-QMIN when a parent returns REFUSED (or NOTIMP) during
-//     a QNAME-minimized delegation step.
-//
-// ⚠️ This is still a learning-oriented skeleton. It simplifies DNSSEC, parallelism,
-// retries, ENT/wildcard edges, etc.
-//
-// Usage:
-//
-//	r := resolver.New()
-//	msg, server, err := r.Resolve(context.Background(), "www.example.com.", dns.TypeA)
-//	...
-//
-// Tested with Go ≥1.21.
 package resolver
 
 import (
@@ -23,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/netip"
 	"sort"
@@ -32,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	dnscache "github.com/linkdata/resolver/cache"
 	"github.com/miekg/dns"
 	"golang.org/x/net/proxy"
 )
@@ -43,8 +27,8 @@ type Resolver struct {
 	Timeout     time.Duration
 	DNSPort     uint16
 	maxChase    int // max CNAME/DNAME chase depth
-	negMu       sync.RWMutex
-	neg         map[negKey]negEntry
+	cacheMu     sync.RWMutex
+	cache       Cacher
 	addrMu      sync.RWMutex
 	addrCache   map[string][]netip.Addr
 	mu          sync.RWMutex // protects following
@@ -57,16 +41,6 @@ type Resolver struct {
 type logContext struct {
 	writer io.Writer
 	start  time.Time
-}
-
-type negKey struct {
-	name  string
-	qtype uint16
-}
-
-type negEntry struct {
-	expiry time.Time
-	soa    *dns.SOA
 }
 
 var ErrCNAMEChainTooDeep = errors.New("resolver: cname/dname chain too deep")
@@ -97,13 +71,19 @@ func New() (r *Resolver) {
 		Timeout:       3 * time.Second,
 		DNSPort:       53,
 		maxChase:      8,
-		neg:           make(map[negKey]negEntry),
+		cache:         dnscache.NewCache(),
 		addrCache:     make(map[string][]netip.Addr),
 		useIPv4:       len(Roots4) > 0,
 		useIPv6:       len(Roots6) > 0,
 		useUDP:        true,
 		rootServers:   roots,
 	}
+}
+
+func (r *Resolver) SetCache(c Cacher) {
+	r.cacheMu.Lock()
+	r.cache = c
+	r.cacheMu.Unlock()
 }
 
 // Resolve performs iterative resolution with QNAME minimization for qname/qtype.
@@ -119,10 +99,9 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 	if depth > r.maxChase {
 		return nil, netip.Addr{}, errCNAMEChainTooDeep{limit: r.maxChase}
 	}
-	if e := r.negGet(qname, qtype); e != nil {
-		logf(log, depth, "negcache hit qname=%s qtype=%s", qname, typeName(qtype))
-		msg := newResponseMsg(qname, qtype, dns.RcodeNameError, nil, []dns.RR{e.soa}, nil)
-		return msg, netip.Addr{}, nil
+	if cached := r.cacheGet(qname, qtype); cached != nil {
+		logf(log, depth, "cache hit qname=%s qtype=%s", qname, typeName(qtype))
+		return cached, netip.Addr{}, nil
 	}
 
 	servers := append([]netip.Addr(nil), r.rootServers...)
@@ -193,14 +172,18 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 			continue
 		}
 		if resp.Rcode == dns.RcodeNameError { // NXDOMAIN at parent ⇒ bubble up
-			_ = r.negPut(zone, dns.TypeNS, resp)
+			if r.cacheStore(resp) {
+				logf(log, depth+1, "delegation cached response zone=%s", zone)
+			}
 			return nil, nil, resp, nil
 		}
 
 		nsOwners := extractDelegationNS(resp, zone)
 		if len(nsOwners) == 0 {
 			if resp.Rcode == dns.RcodeNameError {
-				_ = r.negPut(zone, dns.TypeNS, resp)
+				if r.cacheStore(resp) {
+					logf(log, depth+1, "delegation cached response zone=%s", zone)
+				}
 				return nil, nil, resp, nil
 			}
 			continue
@@ -234,7 +217,9 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 			last = resp
 			logf(log, depth+1, "delegation fallback response full=%s server=%s rcode=%s", fullQname, serverStr, dns.RcodeToString[resp.Rcode])
 			if resp.Rcode == dns.RcodeNameError {
-				_ = r.negPut(fullQname, dns.TypeNS, resp)
+				if r.cacheStore(resp) {
+					logf(log, depth+1, "delegation cached response zone=%s", fullQname)
+				}
 				return nil, nil, resp, nil
 			}
 			nsOwners := extractDelegationNS(resp, fullQname)
@@ -288,6 +273,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 			logf(log, depth+1, "final success partial qname=%s server=%s", qname, r.addrPort(svr))
 			if hasRRType(resp.Answer, qtype) {
 				logf(log, depth+1, "final returning answer qname=%s server=%s", qname, r.addrPort(svr))
+				r.cacheStore(resp)
 				return resp, svr, nil
 			}
 
@@ -298,6 +284,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 					return nil, netip.Addr{}, err
 				}
 				prependRecords(msg, resp, qname, cnameChainRecords)
+				r.cacheStore(msg)
 				return msg, origin, nil
 			}
 
@@ -308,16 +295,17 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 					return nil, netip.Addr{}, err
 				}
 				prependRecords(msg, resp, qname, dnameRecords)
+				r.cacheStore(msg)
 				return msg, origin, nil
 			}
 
-			if r.negPut(qname, qtype, resp) {
+			if r.cacheStore(resp) {
 				logf(log, depth+1, "final cached soa qname=%s", qname)
 				return resp, svr, nil
 			}
 
 		case dns.RcodeNameError:
-			_ = r.negPut(qname, qtype, resp)
+			r.cacheStore(resp)
 			logf(log, depth+1, "final NXDOMAIN qname=%s", qname)
 			return resp, svr, nil
 		}
@@ -329,6 +317,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 				logf(log, depth+1, "final parent delegation qname=%s count=%d", qname, len(answers))
 				parent := parentResp.Copy()
 				parent.Answer = append([]dns.RR(nil), answers...)
+				r.cacheStore(parent)
 				return parent, netip.Addr{}, nil
 			}
 		}
@@ -336,6 +325,7 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 		return nil, netip.Addr{}, errors.New("no response from authoritative servers")
 	}
 	logf(log, depth, "final completed qname=%s server=%s rcode=%s", qname, r.addrPort(lastServer), dns.RcodeToString[last.Rcode])
+	r.cacheStore(last)
 	return last, lastServer, nil
 }
 
@@ -343,7 +333,7 @@ func (r *Resolver) handleTerminal(zone string, resp *dns.Msg, depth int, log log
 	if resp == nil {
 		return nil, netip.Addr{}, errors.New("terminal with no response")
 	}
-	if r.negPut(zone, dns.TypeNS, resp) {
+	if r.cacheStore(resp) {
 		logf(log, depth, "terminal cached soa zone=%s", zone)
 	}
 	return resp, netip.Addr{}, nil
@@ -761,79 +751,36 @@ func dnameSynthesize(resp *dns.Msg, qname string) (string, bool) {
 	return "", false
 }
 
-// -------- Negative cache (minimal RFC 2308) ---------
+// -------- Cache helpers ---------
 
-func (r *Resolver) negPut(name string, qtype uint16, msg *dns.Msg) (cached bool) {
-	if msg != nil {
-		var soa *dns.SOA
-		soa = extractSOA(msg)
-		if soa != nil {
-			var minTTL time.Duration
-			minTTL = time.Duration(soa.Minttl) * time.Second
-			var soaTTL time.Duration
-			soaTTL = time.Duration(soa.Hdr.Ttl) * time.Second
-			if soaTTL > 0 {
-				if minTTL <= 0 || soaTTL < minTTL {
-					minTTL = soaTTL
-				}
+func (r *Resolver) cacheStore(msg *dns.Msg) (cached bool) {
+	if r != nil {
+		r.cacheMu.RLock()
+		cache := r.cache
+		r.cacheMu.RUnlock()
+		if cache != nil {
+			if msg != nil && !msg.Zero && len(msg.Question) == 1 {
+				cache.DnsSet(msg)
+				cached = true
 			}
-			var msgTTL int
-			msgTTL = MinTTL(msg)
-			if msgTTL >= 0 {
-				var msgTTLDuration time.Duration
-				msgTTLDuration = time.Duration(msgTTL) * time.Second
-				if msgTTLDuration > 0 {
-					if minTTL <= 0 || msgTTLDuration < minTTL {
-						minTTL = msgTTLDuration
-					}
-				}
-			}
-			if minTTL <= 0 {
-				minTTL = 30 * time.Second
-			}
-			r.negMu.Lock()
-			r.neg[negKey{strings.ToLower(name), qtype}] = negEntry{expiry: time.Now().Add(minTTL), soa: soa}
-			r.negMu.Unlock()
-			cached = true
 		}
 	}
 	return
 }
 
-func (r *Resolver) negGet(name string, qtype uint16) *negEntry {
-	r.negMu.RLock()
-	e, ok := r.neg[negKey{strings.ToLower(name), qtype}]
-	r.negMu.RUnlock()
-	if !ok {
-		return nil
-	}
-	if time.Now().After(e.expiry) {
-		r.negMu.Lock()
-		delete(r.neg, negKey{strings.ToLower(name), qtype})
-		r.negMu.Unlock()
-		return nil
-	}
-	return &e
-}
-
-// MinTTL returns the lowest resource record TTL in the message, or -1 if there are no records.
-func MinTTL(msg *dns.Msg) int {
-	minTTL := math.MaxInt
-	for _, rr := range msg.Answer {
-		minTTL = min(minTTL, int(rr.Header().Ttl))
-	}
-	for _, rr := range msg.Ns {
-		minTTL = min(minTTL, int(rr.Header().Ttl))
-	}
-	for _, rr := range msg.Extra {
-		if rr.Header().Rrtype != dns.TypeOPT {
-			minTTL = min(minTTL, int(rr.Header().Ttl))
+func (r *Resolver) cacheGet(name string, qtype uint16) (msg *dns.Msg) {
+	if r != nil {
+		r.cacheMu.RLock()
+		cache := r.cache
+		r.cacheMu.RUnlock()
+		if cache != nil {
+			msg = cache.DnsGet(name, qtype)
+			if msg != nil {
+				msg = msg.Copy()
+			}
 		}
 	}
-	if minTTL == math.MaxInt {
-		minTTL = -1
-	}
-	return minTTL
+	return
 }
 
 // -------- TODOs to reach production-grade ---------
@@ -841,6 +788,6 @@ func MinTTL(msg *dns.Msg) int {
 // - Full DNSSEC pipeline (DS lookups, validation, NSEC aggressive use).
 // - ENT & wildcard corner cases under QMIN.
 // - Smarter NS address resolution (bailiwick rules, cycle breaks).
-// - Positive cache with TTL tracking; serve-stale/prefetch.
+// - Positive cache enhancements (serve-stale, prefetch, stale serve).
 // - DoT/DoH transports; padding for privacy.
 // - Upstream health checks and selection policies.

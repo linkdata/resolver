@@ -183,77 +183,53 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 	}
 }
 
-func TestNegPutUsesMessageMinTTL(t *testing.T) {
+func TestResolverCacheStoreAndGet(t *testing.T) {
 	t.Parallel()
-	const (
-		expectedTTLSeconds = 2
-		tolerance          = 50 * time.Millisecond
-	)
 	r := New()
-	soa := &dns.SOA{
+	qname := dns.Fqdn("cache.example.com")
+	qtype := dns.TypeA
+	answer := &dns.A{
 		Hdr: dns.RR_Header{
-			Name:   "example.com.",
-			Rrtype: dns.TypeSOA,
+			Name:   qname,
+			Rrtype: qtype,
 			Class:  dns.ClassINET,
-			Ttl:    600,
+			Ttl:    300,
 		},
-		Ns:     "ns1.example.com.",
-		Mbox:   "hostmaster.example.com.",
-		Serial: 1,
-		Minttl: 400,
+		A: net.IPv4(192, 0, 2, 42),
 	}
-	msg := new(dns.Msg)
-	msg.Ns = append(msg.Ns, soa)
-	msg.Extra = append(msg.Extra, &dns.A{
-		Hdr: dns.RR_Header{
-			Name:   "ns1.example.com.",
-			Rrtype: dns.TypeA,
-			Class:  dns.ClassINET,
-			Ttl:    expectedTTLSeconds,
-		},
-		A: net.IPv4(192, 0, 2, 1),
-	})
-	r.negPut("example.com.", dns.TypeA, msg)
-	entry := r.negGet("example.com.", dns.TypeA)
-	if entry == nil {
-		t.Fatal("expected negative cache entry")
+	msg := newResponseMsg(qname, qtype, dns.RcodeSuccess, []dns.RR{answer}, nil, nil)
+	if !r.cacheStore(msg) {
+		t.Fatal("expected message to be cached")
 	}
-	ttl := time.Until(entry.expiry)
-	expected := time.Duration(expectedTTLSeconds) * time.Second
-	if ttl > expected || ttl < expected-tolerance {
-		t.Fatalf("unexpected ttl got=%s want=%s±%s", ttl, expected, tolerance)
+	cached := r.cacheGet(qname, qtype)
+	if cached == nil {
+		t.Fatalf("expected cached response for %s %s", qname, typeName(qtype))
+	}
+	if !cached.Zero {
+		t.Fatal("cached response must have Zero bit set")
+	}
+	originalQuestion := cached.Question[0].Name
+	cached.Question[0].Name = "mutated.example.com."
+	cachedAgain := r.cacheGet(qname, qtype)
+	if cachedAgain == nil {
+		t.Fatal("expected cached response on second lookup")
+	}
+	if cachedAgain.Question[0].Name != originalQuestion {
+		t.Fatalf("cache returned mutated question got=%s want=%s", cachedAgain.Question[0].Name, originalQuestion)
 	}
 }
 
-func TestNegPutUsesSoaMinimumTTL(t *testing.T) {
+func TestResolverCacheSkipsZeroResponses(t *testing.T) {
 	t.Parallel()
-	const (
-		expectedTTLSeconds = 12
-		tolerance          = 50 * time.Millisecond
-	)
 	r := New()
-	soa := &dns.SOA{
-		Hdr: dns.RR_Header{
-			Name:   "example.org.",
-			Rrtype: dns.TypeSOA,
-			Class:  dns.ClassINET,
-			Ttl:    expectedTTLSeconds,
-		},
-		Ns:     "ns1.example.org.",
-		Mbox:   "hostmaster.example.org.",
-		Serial: 1,
-		Minttl: 40,
+	qname := dns.Fqdn("skip-cache.example.com")
+	qtype := dns.TypeA
+	msg := newResponseMsg(qname, qtype, dns.RcodeSuccess, nil, nil, nil)
+	msg.Zero = true
+	if r.cacheStore(msg) {
+		t.Fatal("unexpectedly cached zero response")
 	}
-	msg := new(dns.Msg)
-	msg.Ns = append(msg.Ns, soa)
-	r.negPut("example.org.", dns.TypeAAAA, msg)
-	entry := r.negGet("example.org.", dns.TypeAAAA)
-	if entry == nil {
-		t.Fatal("expected negative cache entry")
-	}
-	ttl := time.Until(entry.expiry)
-	expected := time.Duration(expectedTTLSeconds) * time.Second
-	if ttl > expected || ttl < expected-tolerance {
-		t.Fatalf("unexpected ttl got=%s want=%s±%s", ttl, expected, tolerance)
+	if cached := r.cacheGet(qname, qtype); cached != nil {
+		t.Fatalf("expected no cache entry, got %v", cached)
 	}
 }
