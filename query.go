@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/netip"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -18,14 +17,9 @@ type query struct {
 	*Resolver
 	ctx       context.Context
 	cache     Cacher
-	log       logContext
-	addrMu    sync.RWMutex
+	writer    io.Writer
+	start     time.Time
 	addrCache map[string][]netip.Addr
-}
-
-type logContext struct {
-	writer io.Writer
-	start  time.Time
 }
 
 // resolveWithDepth is Resolve plus a chase-depth counter to avoid infinite loops.
@@ -274,9 +268,7 @@ func (q *query) handleTerminal(zone string, resp *dns.Msg, depth int) (*dns.Msg,
 func (q *query) resolveNSAddrs(nsOwners []string, depth int) []netip.Addr {
 	var addrs []netip.Addr
 	for _, host := range nsOwners {
-		q.addrMu.RLock()
 		cached, ok := q.addrCache[host]
-		q.addrMu.RUnlock()
 		if ok {
 			q.logf(depth, "resolveNS cached host=%s addrs=%d", host, len(cached))
 			addrs = append(addrs, cached...)
@@ -306,9 +298,7 @@ func (q *query) resolveNSAddrs(nsOwners []string, depth int) []netip.Addr {
 			}
 			resolved = dedupAddrs(resolved)
 			if len(resolved) > 0 {
-				q.addrMu.Lock()
 				q.addrCache[host] = resolved
-				q.addrMu.Unlock()
 				q.logf(depth, "resolveNS resolved host=%s addrs=%d", host, len(resolved))
 				addrs = append(addrs, resolved...)
 			}
@@ -322,19 +312,19 @@ func (q *query) logf(depth int, format string, args ...any) {
 	if q == nil {
 		return
 	}
-	if q.log.writer == nil {
+	if q.writer == nil {
 		return
 	}
-	elapsed := time.Since(q.log.start).Milliseconds()
+	elapsed := time.Since(q.start).Milliseconds()
 	indent := strings.Repeat("  ", depth)
-	_, _ = fmt.Fprintf(q.log.writer, "[%6dms] %s%s\n", elapsed, indent, fmt.Sprintf(format, args...))
+	_, _ = fmt.Fprintf(q.writer, "[%6dms] %s%s\n", elapsed, indent, fmt.Sprintf(format, args...))
 }
 
 func (q *query) logQuerySend(depth int, network string, addr netip.Addr, question dns.Question) {
 	if q == nil {
 		return
 	}
-	if q.log.writer == nil {
+	if q.writer == nil {
 		return
 	}
 	q.logf(depth, "SENDING  %s: @%s %s %q", formatProto(network, addr), addr.String(), typeName(question.Qtype), question.Name)
@@ -344,7 +334,7 @@ func (q *query) logQueryReceive(depth int, network string, addr netip.Addr, ques
 	if q == nil {
 		return
 	}
-	if q.log.writer == nil || resp == nil {
+	if q.writer == nil || resp == nil {
 		return
 	}
 	var flag string

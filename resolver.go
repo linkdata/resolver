@@ -74,7 +74,8 @@ func (r *Resolver) Resolve(ctx context.Context, qname string, qtype uint16, logw
 		Resolver:  r,
 		ctx:       ctx,
 		cache:     cache,
-		log:       logContext{writer: logw, start: time.Now()},
+		writer:    logw,
+		start:     time.Now(),
 		addrCache: make(map[string][]netip.Addr),
 	}
 	qry.logf(0, "resolve start qname=%s qtype=%s", qname, typeName(qtype))
