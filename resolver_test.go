@@ -17,12 +17,19 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 	r := New()
 	r.OrderRoots(t.Context(), time.Millisecond*100)
 	qname := dns.Fqdn("console.aws.amazon.com")
-	msg, _, err := r.Resolve(t.Context(), qname, dns.TypeA, nil)
+	qtype := dns.TypeA
+	msg, _, err := r.Resolve(t.Context(), qname, qtype, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if x := msg.Rcode; x != dns.RcodeSuccess {
 		t.Error(dns.RcodeToString[x])
+	}
+	if x := msg.Question[0].Name; x != qname {
+		t.Error(x)
+	}
+	if x := msg.Question[0].Qtype; x != qtype {
+		t.Error(x)
 	}
 	travelled := make(map[string]struct{})
 	var chainLength int
@@ -82,14 +89,21 @@ func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
 	r := New()
 	r.OrderRoots(t.Context(), time.Millisecond*100)
 	qname := dns.Fqdn("qnamemintest.internet.nl")
+	qtype := dns.TypeTXT
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	msg, _, err := r.Resolve(ctx, qname, dns.TypeTXT, nil)
+	msg, _, err := r.Resolve(ctx, qname, qtype, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if x := msg.Rcode; x != dns.RcodeSuccess {
 		t.Error(dns.RcodeToString[x])
+	}
+	if x := msg.Question[0].Name; x != qname {
+		t.Error(x)
+	}
+	if x := msg.Question[0].Qtype; x != qtype {
+		t.Error(x)
 	}
 	if x := len(msg.Answer); x < 1 {
 		t.Fatal(x)
@@ -125,9 +139,10 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 	r.OrderRoots(t.Context(), time.Millisecond*100)
 	r.Timeout = time.Second
 	qname := dns.Fqdn("bankgirot.nu")
+	qtype := dns.TypeNS
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	msg, _, err := r.Resolve(ctx, qname, dns.TypeNS, nil)
+	msg, _, err := r.Resolve(ctx, qname, qtype, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +151,12 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 	}
 	if x := msg.Rcode; x != dns.RcodeSuccess {
 		t.Error(dns.RcodeToString[x])
+	}
+	if x := msg.Question[0].Name; x != qname {
+		t.Error(x)
+	}
+	if x := msg.Question[0].Qtype; x != qtype {
+		t.Error(x)
 	}
 	if x := len(msg.Answer); x < 1 {
 		t.Fatal(x)

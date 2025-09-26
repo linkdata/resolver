@@ -607,6 +607,21 @@ func dedupAddrs(addrs []netip.Addr) []netip.Addr {
 
 func prependRecords(msg *dns.Msg, resp *dns.Msg, qname string, gather func([]dns.RR, string) []dns.RR) {
 	mergeResponse(msg, resp, gather(resp.Answer, qname))
+	var haveQuestion bool
+	if len(msg.Question) > 0 {
+		msg.Question[0].Name = qname
+		haveQuestion = true
+	}
+	if !haveQuestion {
+		if resp != nil {
+			if len(resp.Question) > 0 {
+				var question dns.Question
+				question = resp.Question[0]
+				question.Name = qname
+				msg.Question = append(msg.Question, question)
+			}
+		}
+	}
 }
 
 func mergeResponse(msg *dns.Msg, resp *dns.Msg, records []dns.RR) {
