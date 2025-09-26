@@ -6,14 +6,17 @@ import (
 	"os"
 
 	"github.com/linkdata/resolver"
+	"github.com/linkdata/resolver/cache"
 	"github.com/miekg/dns"
 )
 
 func Resolve(ctx context.Context, r *resolver.Resolver, name string, qtype uint16) error {
-	msg, server, err := r.Resolve(ctx, name, qtype, os.Stderr, nil)
+	cache := cache.New()
+	msg, server, err := r.Resolve(ctx, name, qtype, os.Stderr, cache)
 	if err == nil {
 		fmt.Println(msg)
 		fmt.Println(";; SERVER:", server.String())
+		fmt.Println(";; CACHE:", cache.Entries(), "entries,", cache.HitRatio(), "hit ratio")
 	}
 	return err
 }

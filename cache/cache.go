@@ -24,7 +24,7 @@ type Cache struct {
 	cq     []*cacheQtype
 }
 
-func NewCache() *Cache {
+func New() *Cache {
 	cq := make([]*cacheQtype, MaxQtype+1)
 	for i := range cq {
 		cq[i] = newCacheQtype()

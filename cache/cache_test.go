@@ -14,7 +14,7 @@ func TestCachePositiveUsesMessageMinTTL(t *testing.T) {
 		expectedTTLSeconds = 2
 		tolerance          = 75 * time.Millisecond
 	)
-	cache := NewCache()
+	cache := New()
 	cache.MinTTL = 0
 	cache.MaxTTL = time.Hour
 	qname := dns.Fqdn("example-positive-ttl.com")
@@ -51,7 +51,7 @@ func TestCacheNegativeUsesNXTTL(t *testing.T) {
 		expectedTTLSeconds = 12
 		tolerance          = 75 * time.Millisecond
 	)
-	cache := NewCache()
+	cache := New()
 	cache.MinTTL = 0
 	cache.NXTTL = time.Duration(expectedTTLSeconds) * time.Second
 	qname := dns.Fqdn("example-negative-ttl.org")

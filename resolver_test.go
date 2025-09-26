@@ -187,7 +187,7 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 func TestResolverCacheStoreAndGet(t *testing.T) {
 	t.Parallel()
 	r := New()
-	cacher := dnscache.NewCache()
+	cacher := dnscache.New()
 	qname := dns.Fqdn("cache.example.com")
 	qtype := dns.TypeA
 	answer := &dns.A{
@@ -203,7 +203,7 @@ func TestResolverCacheStoreAndGet(t *testing.T) {
 	if !r.cacheStore(msg, cacher) {
 		t.Fatal("expected message to be cached")
 	}
-	cached := r.cacheGet(qname, qtype, cacher)
+	cached := cacheGet(qname, qtype, cacher)
 	if cached == nil {
 		t.Fatalf("expected cached response for %s %s", qname, typeName(qtype))
 	}
@@ -212,7 +212,7 @@ func TestResolverCacheStoreAndGet(t *testing.T) {
 	}
 	originalQuestion := cached.Question[0].Name
 	cached.Question[0].Name = "mutated.example.com."
-	cachedAgain := r.cacheGet(qname, qtype, cacher)
+	cachedAgain := cacheGet(qname, qtype, cacher)
 	if cachedAgain == nil {
 		t.Fatal("expected cached response on second lookup")
 	}
@@ -224,7 +224,7 @@ func TestResolverCacheStoreAndGet(t *testing.T) {
 func TestResolverCacheSkipsZeroResponses(t *testing.T) {
 	t.Parallel()
 	r := New()
-	cacher := dnscache.NewCache()
+	cacher := dnscache.New()
 	qname := dns.Fqdn("skip-cache.example.com")
 	qtype := dns.TypeA
 	msg := newResponseMsg(qname, qtype, dns.RcodeSuccess, nil, nil, nil)
@@ -232,7 +232,7 @@ func TestResolverCacheSkipsZeroResponses(t *testing.T) {
 	if r.cacheStore(msg, cacher) {
 		t.Fatal("unexpectedly cached zero response")
 	}
-	if cached := r.cacheGet(qname, qtype, cacher); cached != nil {
+	if cached := cacheGet(qname, qtype, cacher); cached != nil {
 		t.Fatalf("expected no cache entry, got %v", cached)
 	}
 }
@@ -295,7 +295,7 @@ func TestResolverCacheHelpersNilCache(t *testing.T) {
 	if r.cacheStore(msg, nil) {
 		t.Fatal("cacheStore should not store with nil cache")
 	}
-	if cached := r.cacheGet(qname, qtype, nil); cached != nil {
+	if cached := cacheGet(qname, qtype, nil); cached != nil {
 		t.Fatalf("cacheGet should return nil without cache, got %v", cached)
 	}
 }

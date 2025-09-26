@@ -78,8 +78,7 @@ func New() (r *Resolver) {
 
 // Resolve performs iterative resolution with QNAME minimization for qname/qtype.
 func (r *Resolver) Resolve(ctx context.Context, qname string, qtype uint16, logw io.Writer, cache Cacher) (msg *dns.Msg, origin netip.Addr, err error) {
-	var logCtx logContext
-	logCtx = logContext{writer: logw, start: time.Now()}
+	logCtx := logContext{writer: logw, start: time.Now()}
 	logf(logCtx, 0, "resolve start qname=%s qtype=%s", qname, typeName(qtype))
 	msg, origin, err = r.resolveWithDepth(ctx, dns.Fqdn(strings.ToLower(qname)), qtype, 0, logCtx, cache)
 	return
@@ -91,7 +90,7 @@ func (r *Resolver) resolveWithDepth(ctx context.Context, qname string, qtype uin
 	if depth > r.maxChase {
 		return nil, netip.Addr{}, errCNAMEChainTooDeep{limit: r.maxChase}
 	}
-	if cached := r.cacheGet(qname, qtype, cache); cached != nil {
+	if cached := cacheGet(qname, qtype, cache); cached != nil {
 		logf(log, depth, "cache hit qname=%s qtype=%s", qname, typeName(qtype))
 		return cached, netip.Addr{}, nil
 	}
@@ -745,10 +744,9 @@ func (r *Resolver) cacheStore(msg *dns.Msg, cache Cacher) (cached bool) {
 	return
 }
 
-func (r *Resolver) cacheGet(name string, qtype uint16, cache Cacher) (msg *dns.Msg) {
+func cacheGet(name string, qtype uint16, cache Cacher) (msg *dns.Msg) {
 	if cache != nil {
-		msg = cache.DnsGet(name, qtype)
-		if msg != nil {
+		if msg = cache.DnsGet(name, qtype); msg != nil {
 			msg = msg.Copy()
 		}
 	}
