@@ -73,10 +73,10 @@ func (q *query) resolve(qname string, qtype uint16) (resp *dns.Msg, srv netip.Ad
 						if zone == qname {
 							return q.handleTerminal(zone, resp)
 						}
-						q.logf("DELEGATION NXDOMAIN %q continuing\n", zone)
+						q.logf("DELEGATION NXDOMAIN %q\n", zone)
 						return q.queryFinal(qname, qtype, servers, resp)
 					}
-					q.logf("DELEGATION empty NS %q\n", zone)
+					q.logf("DELEGATION EMPTY %q\n", zone)
 					continue
 				}
 
@@ -279,7 +279,7 @@ func (q *query) handleTerminal(zone string, resp *dns.Msg) (*dns.Msg, netip.Addr
 	return resp, netip.Addr{}, nil
 }
 
-// resolveNSAddrs minimally resolves NS owner names to addresses by asking the roots → ...
+// resolveNSAddrs minimally resolves NS owner names to addresses by asking the rootss
 func (q *query) resolveNSAddrs(nsOwners []string) []netip.Addr {
 	var addrs []netip.Addr
 	for _, host := range nsOwners {
@@ -320,30 +320,6 @@ func (q *query) logf(format string, args ...any) {
 	if q.writer != nil {
 		_, _ = fmt.Fprintf(q.writer, "[%6dms]%*s", time.Since(q.start).Milliseconds(), q.depth, "")
 		_, _ = fmt.Fprintf(q.writer, format, args...)
-	}
-}
-
-func (q *query) logQuerySend(network string, addr netip.Addr, question dns.Question) {
-	q.logf("SENDING  %s: @%s %s %q\n", formatProto(network, addr), addr.String(), dns.Type(question.Qtype), question.Name)
-}
-
-func (q *query) logQueryReceive(network string, addr netip.Addr, question dns.Question, resp *dns.Msg, dur time.Duration) {
-	if resp != nil {
-		var flag string
-		if resp.Authoritative {
-			flag = " AUTH"
-		}
-		q.logf("RECEIVED %s: @%s %s %q => %s [%s] (%v, %d bytes%s)\n",
-			formatProto(network, addr),
-			addr.String(),
-			dns.Type(question.Qtype),
-			question.Name,
-			dns.RcodeToString[resp.Rcode],
-			formatCounts(resp),
-			dur.Round(time.Millisecond),
-			resp.Len(),
-			flag,
-		)
 	}
 }
 
