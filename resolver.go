@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	dnscache "github.com/linkdata/resolver/cache"
 	"github.com/miekg/dns"
 	"golang.org/x/net/proxy"
 )
@@ -27,8 +26,6 @@ type Resolver struct {
 	Timeout     time.Duration
 	DNSPort     uint16
 	maxChase    int // max CNAME/DNAME chase depth
-	cacheMu     sync.RWMutex
-	cache       Cacher
 	addrMu      sync.RWMutex
 	addrCache   map[string][]netip.Addr
 	mu          sync.RWMutex // protects following
@@ -71,19 +68,12 @@ func New() (r *Resolver) {
 		Timeout:       3 * time.Second,
 		DNSPort:       53,
 		maxChase:      8,
-		cache:         dnscache.NewCache(),
 		addrCache:     make(map[string][]netip.Addr),
 		useIPv4:       len(Roots4) > 0,
 		useIPv6:       len(Roots6) > 0,
 		useUDP:        true,
 		rootServers:   roots,
 	}
-}
-
-func (r *Resolver) SetCache(c Cacher) {
-	r.cacheMu.Lock()
-	r.cache = c
-	r.cacheMu.Unlock()
 }
 
 // Resolve performs iterative resolution with QNAME minimization for qname/qtype.
@@ -746,38 +736,20 @@ func dnameSynthesize(resp *dns.Msg, qname string) (string, bool) {
 // -------- Cache helpers ---------
 
 func (r *Resolver) cacheStore(msg *dns.Msg, cache Cacher) (cached bool) {
-	if r != nil {
-		var useCache Cacher
-		useCache = cache
-		if useCache == nil {
-			r.cacheMu.RLock()
-			useCache = r.cache
-			r.cacheMu.RUnlock()
-		}
-		if useCache != nil {
-			if msg != nil && !msg.Zero && len(msg.Question) == 1 {
-				useCache.DnsSet(msg)
-				cached = true
-			}
+	if cache != nil {
+		if msg != nil && !msg.Zero && len(msg.Question) == 1 {
+			cache.DnsSet(msg)
+			cached = true
 		}
 	}
 	return
 }
 
 func (r *Resolver) cacheGet(name string, qtype uint16, cache Cacher) (msg *dns.Msg) {
-	if r != nil {
-		var useCache Cacher
-		useCache = cache
-		if useCache == nil {
-			r.cacheMu.RLock()
-			useCache = r.cache
-			r.cacheMu.RUnlock()
-		}
-		if useCache != nil {
-			msg = useCache.DnsGet(name, qtype)
-			if msg != nil {
-				msg = msg.Copy()
-			}
+	if cache != nil {
+		msg = cache.DnsGet(name, qtype)
+		if msg != nil {
+			msg = msg.Copy()
 		}
 	}
 	return
