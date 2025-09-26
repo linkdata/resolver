@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/netip"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,11 +20,12 @@ import (
 
 //go:generate go run ./cmd/genhints roothints.gen.go
 
+const maxChase = 16 // max CNAME/DNAME chase depth
+
 type Resolver struct {
 	proxy.ContextDialer
 	Timeout     time.Duration
 	DNSPort     uint16
-	maxChase    int          // max CNAME/DNAME chase depth
 	mu          sync.RWMutex // protects following
 	useIPv4     bool
 	useIPv6     bool
@@ -34,22 +34,6 @@ type Resolver struct {
 }
 
 var ErrCNAMEChainTooDeep = errors.New("resolver: cname/dname chain too deep")
-
-type errCNAMEChainTooDeep struct {
-	limit int
-}
-
-func (e errCNAMEChainTooDeep) Error() string {
-	return "resolver: cname/dname chain too deep (> " + strconv.Itoa(e.limit) + ")"
-}
-
-func (e errCNAMEChainTooDeep) Is(target error) bool {
-	return target == ErrCNAMEChainTooDeep
-}
-
-func (e errCNAMEChainTooDeep) Unwrap() error {
-	return ErrCNAMEChainTooDeep
-}
 
 // New returns a resolver seeded with IANA root servers.
 func New() (r *Resolver) {
@@ -60,7 +44,6 @@ func New() (r *Resolver) {
 		ContextDialer: &net.Dialer{},
 		Timeout:       3 * time.Second,
 		DNSPort:       53,
-		maxChase:      8,
 		useIPv4:       len(Roots4) > 0,
 		useIPv6:       len(Roots6) > 0,
 		useUDP:        true,
@@ -78,7 +61,7 @@ func (r *Resolver) Resolve(ctx context.Context, qname string, qtype uint16, logw
 		start:     time.Now(),
 		addrCache: make(map[string][]netip.Addr),
 	}
-	qry.logf(0, "resolve start qname=%s qtype=%s", qname, typeName(qtype))
+	qry.logf(0, "resolve start qname=%s qtype=%s", qname, dns.Type(qtype))
 	msg, origin, err = qry.resolveWithDepth(dns.Fqdn(strings.ToLower(qname)), qtype, 0)
 	return
 }
@@ -257,37 +240,16 @@ func ipToAddr(ip net.IP) (addr netip.Addr) {
 	return
 }
 
-func typeName(qtype uint16) string {
-	if name, ok := dns.TypeToString[qtype]; ok {
-		return name
-	}
-	return strconv.Itoa(int(qtype))
-}
-
 func formatProto(network string, addr netip.Addr) string {
-	proto := network
+	suffix := "6"
 	if addr.Is4() {
-		return proto + "4"
+		suffix = "4"
 	}
-	if addr.Is6() {
-		return proto + "6"
-	}
-	return proto
+	return network + suffix
 }
 
 func formatCounts(msg *dns.Msg) string {
 	return fmt.Sprintf("%d+%d+%d A/N/E", len(msg.Answer), len(msg.Ns), len(msg.Extra))
-}
-
-func formatDuration(d time.Duration) string {
-	if d <= 0 {
-		return "0ms"
-	}
-	ms := d.Milliseconds()
-	if ms == 0 {
-		return "<1ms"
-	}
-	return fmt.Sprintf("%dms", ms)
 }
 
 // -------- CNAME/DNAME helpers ---------

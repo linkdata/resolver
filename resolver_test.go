@@ -205,7 +205,7 @@ func TestResolverCacheStoreAndGet(t *testing.T) {
 	}
 	cached := cacheGet(qname, qtype, cacher)
 	if cached == nil {
-		t.Fatalf("expected cached response for %s %s", qname, typeName(qtype))
+		t.Fatalf("expected cached response for %s %s", qname, dns.Type(qtype))
 	}
 	if !cached.Zero {
 		t.Fatal("cached response must have Zero bit set")

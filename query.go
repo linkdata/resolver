@@ -24,12 +24,12 @@ type query struct {
 
 // resolveWithDepth is Resolve plus a chase-depth counter to avoid infinite loops.
 func (q *query) resolveWithDepth(qname string, qtype uint16, depth int) (*dns.Msg, netip.Addr, error) {
-	q.logf(depth, "resolve depth qname=%s qtype=%s", qname, typeName(qtype))
-	if depth > q.maxChase {
-		return nil, netip.Addr{}, errCNAMEChainTooDeep{limit: q.maxChase}
+	q.logf(depth, "resolve depth qname=%s qtype=%s", qname, dns.Type(qtype))
+	if depth > maxChase {
+		return nil, netip.Addr{}, ErrCNAMEChainTooDeep
 	}
 	if cached := cacheGet(qname, qtype, q.cache); cached != nil {
-		q.logf(depth, "cache hit qname=%s qtype=%s", qname, typeName(qtype))
+		q.logf(depth, "cache hit qname=%s qtype=%s", qname, dns.Type(qtype))
 		return cached, netip.Addr{}, nil
 	}
 
@@ -175,7 +175,7 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 // queryFinal asks the authoritative (or closest) servers for the target qname/qtype.
 // It also performs CNAME/DNAME chasing, with a loop bound controlled by depth.
 func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr, depth int, parentResp *dns.Msg) (*dns.Msg, netip.Addr, error) {
-	q.logf(depth, "final query qname=%s qtype=%s servers=%d", qname, typeName(qtype), len(authServers))
+	q.logf(depth, "final query qname=%s qtype=%s servers=%d", qname, dns.Type(qtype), len(authServers))
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
 	m.RecursionDesired = false
@@ -317,7 +317,7 @@ func (q *query) logf(depth int, format string, args ...any) {
 }
 
 func (q *query) logQuerySend(depth int, network string, addr netip.Addr, question dns.Question) {
-	q.logf(depth, "SENDING  %s: @%s %s %q", formatProto(network, addr), addr.String(), typeName(question.Qtype), question.Name)
+	q.logf(depth, "SENDING  %s: @%s %s %q", formatProto(network, addr), addr.String(), dns.Type(question.Qtype), question.Name)
 }
 
 func (q *query) logQueryReceive(depth int, network string, addr netip.Addr, question dns.Question, resp *dns.Msg, dur time.Duration) {
@@ -326,14 +326,14 @@ func (q *query) logQueryReceive(depth int, network string, addr netip.Addr, ques
 		if resp.Authoritative {
 			flag = " AUTH"
 		}
-		q.logf(depth, "RECEIVED %s: @%s %s %q => %s [%s] (%s, %d bytes%s)",
+		q.logf(depth, "RECEIVED %s: @%s %s %q => %s [%s] (%v, %d bytes%s)",
 			formatProto(network, addr),
 			addr.String(),
-			typeName(question.Qtype),
+			dns.Type(question.Qtype),
 			question.Name,
 			dns.RcodeToString[resp.Rcode],
 			formatCounts(resp),
-			formatDuration(dur),
+			dur.Round(time.Millisecond),
 			resp.Len(),
 			flag,
 		)
