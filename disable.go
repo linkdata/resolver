@@ -21,7 +21,7 @@ func (r *Service) usingIPv6() (yes bool) {
 	return
 }
 
-func (r *Service) maybeDisableIPv6(err error) (disabled bool) {
+func (r *Service) maybeDisableIPv6(err error) {
 	if err != nil {
 		errstr := err.Error()
 		if errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) ||
@@ -29,7 +29,6 @@ func (r *Service) maybeDisableIPv6(err error) (disabled bool) {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			if r.useIPv6 {
-				disabled = true
 				r.useIPv6 = false
 				var idx int
 				for i := range r.rootServers {
@@ -42,17 +41,17 @@ func (r *Service) maybeDisableIPv6(err error) (disabled bool) {
 			}
 		}
 	}
-	return
 }
 
-func (r *Service) maybeDisableUdp(err error) (disabled bool) {
+func (r *Service) maybeDisableUdp(err error) (newerr error) {
+	newerr = err
 	var ne net.Error
 	if errors.As(err, &ne) && !ne.Timeout() {
 		errstr := err.Error()
 		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EPROTONOSUPPORT) || strings.Contains(errstr, "network not implemented") {
 			r.mu.Lock()
 			defer r.mu.Unlock()
-			disabled = r.useUDP
+			newerr = nil
 			r.useUDP = false
 		}
 	}

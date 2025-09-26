@@ -4,7 +4,6 @@ package resolver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,7 +20,8 @@ import (
 
 //go:generate go run ./cmd/genhints roothints.gen.go
 
-const maxChase = 16 // max CNAME/DNAME chase depth
+const maxChase = 16    // max CNAME/DNAME chase depth
+const maxQueries = 128 // max queries to make for a single resolve
 
 type Service struct {
 	proxy.ContextDialer
@@ -37,8 +37,6 @@ type Service struct {
 func (r *Service) DnsResolve(ctx context.Context, qname string, qtype uint16) (msg *dns.Msg, srv netip.Addr, err error) {
 	return r.Resolve(ctx, qname, qtype, nil, DefaultCache)
 }
-
-var ErrCNAMEChainTooDeep = errors.New("resolver: cname/dname chain too deep")
 
 var _ Resolver = &Service{}
 var DefaultCache = cache.New()

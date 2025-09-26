@@ -19,8 +19,12 @@ type query struct {
 	cache     Cacher
 	writer    io.Writer
 	start     time.Time
+	queries   int
 	addrCache map[string][]netip.Addr
 }
+
+var ErrCNAMEChainTooDeep = errors.New("cname/dname chain too deep")
+var ErrTooManyQueries = errors.New("to many queries, possible loop")
 
 // resolveWithDepth is Resolve plus a chase-depth counter to avoid infinite loops.
 func (q *query) resolveWithDepth(qname string, qtype uint16, depth int) (*dns.Msg, netip.Addr, error) {
@@ -339,13 +343,23 @@ func (q *query) logQueryReceive(depth int, network string, addr netip.Addr, ques
 	}
 }
 func (q *query) exchange(m *dns.Msg, server netip.Addr, depth int) (resp *dns.Msg, err error) {
-	if resp, err = q.exchangeWithNetwork("udp", m, server, depth+1); err != nil {
-		if q.maybeDisableUdp(err) {
-			err = nil
+	q.queries++
+	if q.queries > maxQueries {
+		return nil, ErrTooManyQueries
+	}
+	if q.cache != nil {
+		if resp = q.cache.DnsGet(m.Question[0].Name, m.Question[0].Qtype); resp != nil {
+			return
 		}
+	}
+	if resp, err = q.exchangeWithNetwork("udp", m, server, depth+1); err != nil {
+		err = q.maybeDisableUdp(err)
 	}
 	if err == nil && (resp == nil || resp.Truncated) {
 		resp, err = q.exchangeWithNetwork("tcp", m, server, depth+1)
+	}
+	if resp != nil && q.cache != nil {
+		q.cache.DnsSet(resp)
 	}
 	return
 }
