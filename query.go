@@ -94,45 +94,80 @@ func (q *query) resolve(qname string, qtype uint16) (resp *dns.Msg, srv netip.Ad
 // queryForDelegation performs the QMIN step at `zone` against `parentServers`.
 // If servers REFUSE/NOTIMP the minimized NS query, retry with non-QMIN (ask NS for the full qname).
 // Returns: (nsOwnerNames, resolvedServerAddrs, lastResponse, error)
-func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, fullQname string) (nsOwnerNames []string, resolvedServerAddrs []netip.Addr, last *dns.Msg, err error) {
-	if err = q.dive(); err == nil {
-		defer q.surface()
-		m := new(dns.Msg)
-		m.SetQuestion(zone, dns.TypeNS)
-		m.RecursionDesired = false
-		setEDNS(m)
+func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, fullQname string) (nsOwners []string, resolvedServerAddrs []netip.Addr, last *dns.Msg, err error) {
+	m := new(dns.Msg)
+	m.SetQuestion(zone, dns.TypeNS)
+	m.RecursionDesired = false
+	setEDNS(m)
 
-		refusedSeen := false
+	refusedSeen := false
+	for _, svr := range shuffle(parentServers) {
+		resp, err := q.exchange(m, svr)
+		if err != nil {
+			q.logf("DELEGATION ERROR @%s NS %q: %v\n", svr, zone, err)
+			continue
+		}
+		if resp == nil {
+			continue
+		}
+		last = resp
+
+		if resp.Rcode == dns.RcodeRefused || resp.Rcode == dns.RcodeNotImplemented {
+			refusedSeen = true
+			continue
+		}
+		if resp.Rcode == dns.RcodeNameError { // NXDOMAIN at parent ⇒ bubble up
+			if q.cacheStore(resp, q.cache) {
+				q.logf("DELEGATION cached response zone=%s\n", zone)
+			}
+			return nil, nil, resp, nil
+		}
+
+		nsOwners = extractDelegationNS(resp, zone)
+		if len(nsOwners) == 0 {
+			if resp.Rcode == dns.RcodeNameError {
+				if q.cacheStore(resp, q.cache) {
+					q.logf("DELEGATION cached response zone=%s\n", zone)
+				}
+				return nil, nil, resp, nil
+			}
+			continue
+		}
+		addrs := glueAddresses(resp)
+		if len(addrs) == 0 {
+			addrs = q.resolveNSAddrs(nsOwners)
+		}
+		if len(addrs) > 0 {
+			return nsOwners, addrs, resp, nil
+		}
+	}
+	// Fallback to non-QMIN if we observed REFUSED/NOTIMP
+	if refusedSeen {
+		q.logf("DELEGATION non-QMIN %q\n", zone)
+		m2 := new(dns.Msg)
+		m2.SetQuestion(fullQname, dns.TypeNS) // ask NS for the full name (non-minimized)
+		m2.RecursionDesired = false
+		setEDNS(m2)
 		for _, svr := range shuffle(parentServers) {
-			resp, err := q.exchange(m, svr)
+			q.logf("DELEGATION non-QMIN QUERY @%s NS %q", svr, fullQname)
+			resp, err := q.exchange(m2, svr)
 			if err != nil {
-				q.logf("DELEGATION ERROR @%s NS %q: %v\n", svr, zone, err)
+				q.logf("DELEGATION non-QMIN ERROR @%s NS %q: %v\n", svr, fullQname, err)
 				continue
 			}
 			if resp == nil {
 				continue
 			}
 			last = resp
-
-			if resp.Rcode == dns.RcodeRefused || resp.Rcode == dns.RcodeNotImplemented {
-				refusedSeen = true
-				continue
-			}
-			if resp.Rcode == dns.RcodeNameError { // NXDOMAIN at parent ⇒ bubble up
+			q.logf("DELEGATION non-QMIN ANSWER @%s NS %q: %s\n", svr, fullQname, dns.RcodeToString[resp.Rcode])
+			if resp.Rcode == dns.RcodeNameError {
 				if q.cacheStore(resp, q.cache) {
-					q.logf("DELEGATION cached response zone=%s\n", zone)
+					q.logf("DELEGATION non-QMIN ANSWER cached NS %q\n", fullQname)
 				}
 				return nil, nil, resp, nil
 			}
-
-			nsOwners := extractDelegationNS(resp, zone)
+			nsOwners := extractDelegationNS(resp, fullQname)
 			if len(nsOwners) == 0 {
-				if resp.Rcode == dns.RcodeNameError {
-					if q.cacheStore(resp, q.cache) {
-						q.logf("DELEGATION cached response zone=%s\n", zone)
-					}
-					return nil, nil, resp, nil
-				}
 				continue
 			}
 			addrs := glueAddresses(resp)
@@ -140,46 +175,8 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 				addrs = q.resolveNSAddrs(nsOwners)
 			}
 			if len(addrs) > 0 {
+				q.logf("DELEGATION non-QMIN RESULT NS %q: %d addrs\n", fullQname, len(addrs))
 				return nsOwners, addrs, resp, nil
-			}
-		}
-		// Fallback to non-QMIN if we observed REFUSED/NOTIMP
-		if refusedSeen {
-			q.logf("DELEGATION non-QMIN %q\n", zone)
-			m2 := new(dns.Msg)
-			m2.SetQuestion(fullQname, dns.TypeNS) // ask NS for the full name (non-minimized)
-			m2.RecursionDesired = false
-			setEDNS(m2)
-			for _, svr := range shuffle(parentServers) {
-				q.logf("DELEGATION non-QMIN QUERY @%s NS %q", svr, fullQname)
-				resp, err := q.exchange(m2, svr)
-				if err != nil {
-					q.logf("DELEGATION non-QMIN ERROR @%s NS %q: %v\n", svr, fullQname, err)
-					continue
-				}
-				if resp == nil {
-					continue
-				}
-				last = resp
-				q.logf("DELEGATION non-QMIN ANSWER @%s NS %q: %s\n", svr, fullQname, dns.RcodeToString[resp.Rcode])
-				if resp.Rcode == dns.RcodeNameError {
-					if q.cacheStore(resp, q.cache) {
-						q.logf("DELEGATION non-QMIN ANSWER cached NS %q\n", fullQname)
-					}
-					return nil, nil, resp, nil
-				}
-				nsOwners := extractDelegationNS(resp, fullQname)
-				if len(nsOwners) == 0 {
-					continue
-				}
-				addrs := glueAddresses(resp)
-				if len(addrs) == 0 {
-					addrs = q.resolveNSAddrs(nsOwners)
-				}
-				if len(addrs) > 0 {
-					q.logf("DELEGATION non-QMIN RESULT NS %q: %d addrs\n", fullQname, len(addrs))
-					return nsOwners, addrs, resp, nil
-				}
 			}
 		}
 	}
@@ -349,6 +346,7 @@ func (q *query) logQueryReceive(network string, addr netip.Addr, question dns.Qu
 		)
 	}
 }
+
 func (q *query) exchange(m *dns.Msg, server netip.Addr) (resp *dns.Msg, err error) {
 	if err = q.dive(); err == nil {
 		defer q.surface()
@@ -383,16 +381,30 @@ func (q *query) exchangeWithNetwork(network string, m *dns.Msg, server netip.Add
 			if !deadline.IsZero() {
 				_ = dnsConn.SetDeadline(deadline)
 			}
-			var question dns.Question
-			if len(m.Question) > 0 {
-				question = m.Question[0]
-				q.logQuerySend(network, server, question)
+			question := m.Question[0]
+			var now time.Time
+			if q.writer != nil {
+				q.logf("SENDING %s: @%s %s %q => ", formatProto(network, server), server, dns.Type(question.Qtype), question.Name)
+				now = time.Now()
 			}
-			start := time.Now()
 			if err = dnsConn.WriteMsg(m); err == nil {
 				resp, err = dnsConn.ReadMsg()
-				if err == nil && len(m.Question) > 0 {
-					q.logQueryReceive(network, server, question, resp, time.Since(start))
+			}
+			if q.writer != nil {
+				if resp != nil {
+					var flag string
+					if resp.Authoritative {
+						flag = " AUTH"
+					}
+					fmt.Fprintf(q.writer, "%s [%s] (%v, %d bytes%s)\n",
+						dns.RcodeToString[resp.Rcode],
+						formatCounts(resp),
+						time.Since(now).Round(time.Millisecond),
+						resp.Len(),
+						flag,
+					)
+				} else {
+					fmt.Fprintf(q.writer, "%v\n", err)
 				}
 			}
 		}
