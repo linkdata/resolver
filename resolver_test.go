@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -179,5 +180,80 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 	}
 	if len(expect) > 0 {
 		t.Fatalf("missing expected ns records: %v", expect)
+	}
+}
+
+func TestNegPutUsesMessageMinTTL(t *testing.T) {
+	t.Parallel()
+	const (
+		expectedTTLSeconds = 2
+		tolerance          = 50 * time.Millisecond
+	)
+	r := New()
+	soa := &dns.SOA{
+		Hdr: dns.RR_Header{
+			Name:   "example.com.",
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    600,
+		},
+		Ns:     "ns1.example.com.",
+		Mbox:   "hostmaster.example.com.",
+		Serial: 1,
+		Minttl: 400,
+	}
+	msg := new(dns.Msg)
+	msg.Ns = append(msg.Ns, soa)
+	msg.Extra = append(msg.Extra, &dns.A{
+		Hdr: dns.RR_Header{
+			Name:   "ns1.example.com.",
+			Rrtype: dns.TypeA,
+			Class:  dns.ClassINET,
+			Ttl:    expectedTTLSeconds,
+		},
+		A: net.IPv4(192, 0, 2, 1),
+	})
+	r.negPut("example.com.", dns.TypeA, msg)
+	entry := r.negGet("example.com.", dns.TypeA)
+	if entry == nil {
+		t.Fatal("expected negative cache entry")
+	}
+	ttl := time.Until(entry.expiry)
+	expected := time.Duration(expectedTTLSeconds) * time.Second
+	if ttl > expected || ttl < expected-tolerance {
+		t.Fatalf("unexpected ttl got=%s want=%s±%s", ttl, expected, tolerance)
+	}
+}
+
+func TestNegPutUsesSoaMinimumTTL(t *testing.T) {
+	t.Parallel()
+	const (
+		expectedTTLSeconds = 12
+		tolerance          = 50 * time.Millisecond
+	)
+	r := New()
+	soa := &dns.SOA{
+		Hdr: dns.RR_Header{
+			Name:   "example.org.",
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    expectedTTLSeconds,
+		},
+		Ns:     "ns1.example.org.",
+		Mbox:   "hostmaster.example.org.",
+		Serial: 1,
+		Minttl: 40,
+	}
+	msg := new(dns.Msg)
+	msg.Ns = append(msg.Ns, soa)
+	r.negPut("example.org.", dns.TypeAAAA, msg)
+	entry := r.negGet("example.org.", dns.TypeAAAA)
+	if entry == nil {
+		t.Fatal("expected negative cache entry")
+	}
+	ttl := time.Until(entry.expiry)
+	expected := time.Duration(expectedTTLSeconds) * time.Second
+	if ttl > expected || ttl < expected-tolerance {
+		t.Fatalf("unexpected ttl got=%s want=%s±%s", ttl, expected, tolerance)
 	}
 }

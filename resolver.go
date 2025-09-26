@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"sort"
@@ -192,18 +193,14 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 			continue
 		}
 		if resp.Rcode == dns.RcodeNameError { // NXDOMAIN at parent ⇒ bubble up
-			if soa := extractSOA(resp); soa != nil {
-				r.negPut(zone, dns.TypeNS, soa)
-			}
+			_ = r.negPut(zone, dns.TypeNS, resp)
 			return nil, nil, resp, nil
 		}
 
 		nsOwners := extractDelegationNS(resp, zone)
 		if len(nsOwners) == 0 {
 			if resp.Rcode == dns.RcodeNameError {
-				if soa := extractSOA(resp); soa != nil {
-					r.negPut(zone, dns.TypeNS, soa)
-				}
+				_ = r.negPut(zone, dns.TypeNS, resp)
 				return nil, nil, resp, nil
 			}
 			continue
@@ -237,9 +234,7 @@ func (r *Resolver) queryForDelegation(ctx context.Context, zone string, parentSe
 			last = resp
 			logf(log, depth+1, "delegation fallback response full=%s server=%s rcode=%s", fullQname, serverStr, dns.RcodeToString[resp.Rcode])
 			if resp.Rcode == dns.RcodeNameError {
-				if soa := extractSOA(resp); soa != nil {
-					r.negPut(fullQname, dns.TypeNS, soa)
-				}
+				_ = r.negPut(fullQname, dns.TypeNS, resp)
 				return nil, nil, resp, nil
 			}
 			nsOwners := extractDelegationNS(resp, fullQname)
@@ -316,16 +311,13 @@ func (r *Resolver) queryFinal(ctx context.Context, qname string, qtype uint16, a
 				return msg, origin, nil
 			}
 
-			if soa := extractSOA(resp); soa != nil {
-				r.negPut(qname, qtype, soa)
+			if r.negPut(qname, qtype, resp) {
 				logf(log, depth+1, "final cached soa qname=%s", qname)
 				return resp, svr, nil
 			}
 
 		case dns.RcodeNameError:
-			if soa := extractSOA(resp); soa != nil {
-				r.negPut(qname, qtype, soa)
-			}
+			_ = r.negPut(qname, qtype, resp)
 			logf(log, depth+1, "final NXDOMAIN qname=%s", qname)
 			return resp, svr, nil
 		}
@@ -351,8 +343,7 @@ func (r *Resolver) handleTerminal(zone string, resp *dns.Msg, depth int, log log
 	if resp == nil {
 		return nil, netip.Addr{}, errors.New("terminal with no response")
 	}
-	if soa := extractSOA(resp); soa != nil {
-		r.negPut(zone, dns.TypeNS, soa)
+	if r.negPut(zone, dns.TypeNS, resp) {
 		logf(log, depth, "terminal cached soa zone=%s", zone)
 	}
 	return resp, netip.Addr{}, nil
@@ -772,21 +763,41 @@ func dnameSynthesize(resp *dns.Msg, qname string) (string, bool) {
 
 // -------- Negative cache (minimal RFC 2308) ---------
 
-func (r *Resolver) negPut(name string, qtype uint16, soa *dns.SOA) {
-	if soa == nil {
-		return
+func (r *Resolver) negPut(name string, qtype uint16, msg *dns.Msg) (cached bool) {
+	if msg != nil {
+		var soa *dns.SOA
+		soa = extractSOA(msg)
+		if soa != nil {
+			var minTTL time.Duration
+			minTTL = time.Duration(soa.Minttl) * time.Second
+			var soaTTL time.Duration
+			soaTTL = time.Duration(soa.Hdr.Ttl) * time.Second
+			if soaTTL > 0 {
+				if minTTL <= 0 || soaTTL < minTTL {
+					minTTL = soaTTL
+				}
+			}
+			var msgTTL int
+			msgTTL = MinTTL(msg)
+			if msgTTL >= 0 {
+				var msgTTLDuration time.Duration
+				msgTTLDuration = time.Duration(msgTTL) * time.Second
+				if msgTTLDuration > 0 {
+					if minTTL <= 0 || msgTTLDuration < minTTL {
+						minTTL = msgTTLDuration
+					}
+				}
+			}
+			if minTTL <= 0 {
+				minTTL = 30 * time.Second
+			}
+			r.negMu.Lock()
+			r.neg[negKey{strings.ToLower(name), qtype}] = negEntry{expiry: time.Now().Add(minTTL), soa: soa}
+			r.negMu.Unlock()
+			cached = true
+		}
 	}
-	minTTL := time.Duration(soa.Minttl) * time.Second
-	soaTTL := time.Duration(soa.Hdr.Ttl) * time.Second
-	if soaTTL > 0 && soaTTL < minTTL {
-		minTTL = soaTTL
-	}
-	if minTTL <= 0 {
-		minTTL = 30 * time.Second
-	}
-	r.negMu.Lock()
-	r.neg[negKey{strings.ToLower(name), qtype}] = negEntry{expiry: time.Now().Add(minTTL), soa: soa}
-	r.negMu.Unlock()
+	return
 }
 
 func (r *Resolver) negGet(name string, qtype uint16) *negEntry {
@@ -803,6 +814,26 @@ func (r *Resolver) negGet(name string, qtype uint16) *negEntry {
 		return nil
 	}
 	return &e
+}
+
+// MinTTL returns the lowest resource record TTL in the message, or -1 if there are no records.
+func MinTTL(msg *dns.Msg) int {
+	minTTL := math.MaxInt
+	for _, rr := range msg.Answer {
+		minTTL = min(minTTL, int(rr.Header().Ttl))
+	}
+	for _, rr := range msg.Ns {
+		minTTL = min(minTTL, int(rr.Header().Ttl))
+	}
+	for _, rr := range msg.Extra {
+		if rr.Header().Rrtype != dns.TypeOPT {
+			minTTL = min(minTTL, int(rr.Header().Ttl))
+		}
+	}
+	if minTTL == math.MaxInt {
+		minTTL = -1
+	}
+	return minTTL
 }
 
 // -------- TODOs to reach production-grade ---------
