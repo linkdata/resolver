@@ -52,54 +52,47 @@ func (q *query) surface() {
 
 func (q *query) resolve(qname string, qtype uint16) (resp *dns.Msg, srv netip.Addr, err error) {
 	qname = dns.CanonicalName(qname)
-	if err = q.dive("RESOLVE QUERY %s %q\n", dns.Type(qtype), qname); err == nil {
-		defer func() {
-			q.surface()
-			q.logf("RESOLVE ANSWER %s %q => ", dns.Type(qtype), qname)
-			q.logResponse(time.Time{}, resp, err)
-		}()
-		if resp = cacheGet(qname, qtype, q.cache); resp == nil {
+	if resp = cacheGet(qname, qtype, q.cache); resp == nil {
 
-			servers := append([]netip.Addr(nil), q.rootServers...)
-			labels := dns.SplitDomainName(qname)
+		servers := append([]netip.Addr(nil), q.rootServers...)
+		labels := dns.SplitDomainName(qname)
 
-			// Walk down: "." -> "com." -> "example.com."
-			for i := len(labels) - 1; i >= 0; i-- {
-				zone := dns.Fqdn(strings.Join(labels[i:], "."))
-				var nsSet []string
-				var nextSrv []netip.Addr
+		// Walk down: "." -> "com." -> "example.com."
+		for i := len(labels) - 1; i >= 0; i-- {
+			zone := dns.Fqdn(strings.Join(labels[i:], "."))
+			var nsSet []string
+			var nextSrv []netip.Addr
 
-				if nsSet, nextSrv, resp, err = q.queryForDelegation(zone, servers, qname); err != nil {
-					q.logf("DELEGATION ERROR %q: %v\n", zone, err)
-					return
-				}
-				rcode := dns.RcodeServerFailure
-				if resp != nil {
-					rcode = resp.Rcode
-				}
-
-				if zone == qname {
-					if len(nextSrv) > 0 {
-						servers = nextSrv
-					}
-					break
-				}
-
-				if len(nsSet) == 0 {
-					if rcode == dns.RcodeNameError {
-						if zone == qname {
-							return q.handleTerminal(zone, resp)
-						}
-						return q.queryFinal(qname, qtype, servers, resp)
-					}
-					continue
-				}
-
-				servers = nextSrv
+			if nsSet, nextSrv, resp, err = q.queryForDelegation(zone, servers, qname); err != nil {
+				q.logf("DELEGATION ERROR %q: %v\n", zone, err)
+				return
+			}
+			rcode := dns.RcodeServerFailure
+			if resp != nil {
+				rcode = resp.Rcode
 			}
 
-			return q.queryFinal(qname, qtype, servers, resp)
+			if zone == qname {
+				if len(nextSrv) > 0 {
+					servers = nextSrv
+				}
+				break
+			}
+
+			if len(nsSet) == 0 {
+				if rcode == dns.RcodeNameError {
+					if zone == qname {
+						return q.handleTerminal(zone, resp)
+					}
+					return q.queryFinal(qname, qtype, servers, resp)
+				}
+				continue
+			}
+
+			servers = nextSrv
 		}
+
+		return q.queryFinal(qname, qtype, servers, resp)
 	}
 	return
 }
@@ -209,15 +202,8 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 	if err = q.dive("QUERY %s %q from %d servers\n", dns.Type(qtype), qname, len(authServers)); err == nil {
 		defer func() {
 			q.surface()
-			var numrecords int
-			if last != nil {
-				numrecords = len(last.Answer)
-			}
-			var errtxt string
-			if err != nil {
-				errtxt = ": " + err.Error()
-			}
-			q.logf("ANSWER @%s %s %q with %d records%s\n", lastServer, dns.Type(qtype), qname, numrecords, errtxt)
+			q.logf("ANSWER @%s %s %q => ", lastServer, dns.Type(qtype), qname)
+			q.logResponse(time.Time{}, last, err)
 		}()
 		m := new(dns.Msg)
 		m.SetQuestion(qname, qtype)
@@ -285,7 +271,6 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 				}
 			}
 			err = errors.New("no response from authoritative servers")
-			return
 		}
 	}
 	return
