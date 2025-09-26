@@ -274,16 +274,6 @@ func dnameSynthesize(resp *dns.Msg, qname string) (string, bool) {
 
 // -------- Cache helpers ---------
 
-func (r *Service) cacheStore(msg *dns.Msg, cache Cacher) (cached bool) {
-	if cache != nil {
-		if msg != nil && !msg.Zero && len(msg.Question) == 1 {
-			cache.DnsSet(msg)
-			cached = true
-		}
-	}
-	return
-}
-
 func cloneIfCached(msg *dns.Msg) (clone *dns.Msg) {
 	clone = msg
 	if msg != nil {

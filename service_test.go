@@ -186,7 +186,6 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 
 func TestResolverCacheStoreAndGet(t *testing.T) {
 	t.Parallel()
-	r := New()
 	cacher := dnscache.New()
 	qname := dns.Fqdn("cache.example.com")
 	qtype := dns.TypeA
@@ -200,9 +199,7 @@ func TestResolverCacheStoreAndGet(t *testing.T) {
 		A: net.IPv4(192, 0, 2, 42),
 	}
 	msg := newResponseMsg(qname, qtype, dns.RcodeSuccess, []dns.RR{answer}, nil, nil)
-	if !r.cacheStore(msg, cacher) {
-		t.Fatal("expected message to be cached")
-	}
+	cacher.DnsSet(msg)
 	cached := cacheGet(qname, qtype, cacher)
 	if cached == nil {
 		t.Fatalf("expected cached response for %s %s", qname, dns.Type(qtype))
@@ -224,15 +221,11 @@ func TestResolverCacheStoreAndGet(t *testing.T) {
 
 func TestResolverCacheSkipsZeroResponses(t *testing.T) {
 	t.Parallel()
-	r := New()
 	cacher := dnscache.New()
 	qname := dns.Fqdn("skip-cache.example.com")
 	qtype := dns.TypeA
 	msg := newResponseMsg(qname, qtype, dns.RcodeSuccess, nil, nil, nil)
 	msg.Zero = true
-	if r.cacheStore(msg, cacher) {
-		t.Fatal("unexpectedly cached zero response")
-	}
 	if cached := cacheGet(qname, qtype, cacher); cached != nil {
 		t.Fatalf("expected no cache entry, got %v", cached)
 	}
@@ -277,29 +270,6 @@ func TestResolverResolveUsesProvidedCache(t *testing.T) {
 	}
 	if override.msg.Question[0].Name != originalQuestion {
 		t.Fatalf("override cache msg mutated got=%s want=%s", override.msg.Question[0].Name, originalQuestion)
-	}
-}
-
-func TestResolverCacheHelpersNilCache(t *testing.T) {
-	t.Parallel()
-	r := New()
-	qname := dns.Fqdn("nil-cache.example.com")
-	qtype := dns.TypeA
-	answer := &dns.A{
-		Hdr: dns.RR_Header{
-			Name:   qname,
-			Rrtype: qtype,
-			Class:  dns.ClassINET,
-			Ttl:    60,
-		},
-		A: net.IPv4(192, 0, 2, 10),
-	}
-	msg := newResponseMsg(qname, qtype, dns.RcodeSuccess, []dns.RR{answer}, nil, nil)
-	if r.cacheStore(msg, nil) {
-		t.Fatal("cacheStore should not store with nil cache")
-	}
-	if cached := cacheGet(qname, qtype, nil); cached != nil {
-		t.Fatalf("cacheGet should return nil without cache, got %v", cached)
 	}
 }
 

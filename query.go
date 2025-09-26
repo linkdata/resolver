@@ -117,18 +117,12 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 			continue
 		}
 		if resp.Rcode == dns.RcodeNameError { // NXDOMAIN at parent ⇒ bubble up
-			if q.cacheStore(resp, q.cache) {
-				q.logf("DELEGATION cached response zone=%s\n", zone)
-			}
 			return nil, nil, resp, nil
 		}
 
 		nsOwners = extractDelegationNS(resp, zone)
 		if len(nsOwners) == 0 {
 			if resp.Rcode == dns.RcodeNameError {
-				if q.cacheStore(resp, q.cache) {
-					q.logf("DELEGATION cached response zone=%s\n", zone)
-				}
 				return nil, nil, resp, nil
 			}
 			continue
@@ -161,9 +155,6 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 			last = resp
 			q.logf("DELEGATION non-QMIN ANSWER @%s NS %q: %s\n", svr, fullQname, dns.RcodeToString[resp.Rcode])
 			if resp.Rcode == dns.RcodeNameError {
-				if q.cacheStore(resp, q.cache) {
-					q.logf("DELEGATION non-QMIN ANSWER cached NS %q\n", fullQname)
-				}
 				return nil, nil, resp, nil
 			}
 			nsOwners := extractDelegationNS(resp, fullQname)
@@ -211,7 +202,6 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 		case dns.RcodeSuccess:
 			if hasRRType(resp.Answer, qtype) {
 				q.logf("FINAL ANSWER @%s %s %q\n", svr, dns.Type(qtype), qname)
-				q.cacheStore(resp, q.cache)
 				return resp, svr, nil
 			}
 
@@ -223,7 +213,6 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 				}
 				msg = cloneIfCached(msg)
 				prependRecords(msg, resp, qname, cnameChainRecords)
-				q.cacheStore(msg, q.cache)
 				return msg, origin, nil
 			}
 
@@ -235,17 +224,13 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 				}
 				msg = cloneIfCached(msg)
 				prependRecords(msg, resp, qname, dnameRecords)
-				q.cacheStore(msg, q.cache)
 				return msg, origin, nil
 			}
 
-			if q.cacheStore(resp, q.cache) {
-				q.logf("FINAL cached soa qname=%s\n", qname)
-				return resp, svr, nil
-			}
+			q.logf("FINAL soa qname=%s\n", qname)
+			return resp, svr, nil
 
 		case dns.RcodeNameError:
-			q.cacheStore(resp, q.cache)
 			q.logf("FINAL NXDOMAIN qname=%s\n", qname)
 			return resp, svr, nil
 		}
@@ -257,7 +242,6 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 				q.logf("FINAL parent delegation qname=%s count=%d\n", qname, len(answers))
 				parent := parentResp.Copy()
 				parent.Answer = append([]dns.RR(nil), answers...)
-				q.cacheStore(parent, q.cache)
 				return parent, netip.Addr{}, nil
 			}
 		}
@@ -265,16 +249,12 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 		return nil, netip.Addr{}, errors.New("no response from authoritative servers")
 	}
 	q.logf("FINAL result @%s %s %q: %s\n", lastServer, dns.Type(qtype), qname, dns.RcodeToString[last.Rcode])
-	q.cacheStore(last, q.cache)
 	return last, lastServer, nil
 }
 
 func (q *query) handleTerminal(zone string, resp *dns.Msg) (*dns.Msg, netip.Addr, error) {
 	if resp == nil {
 		return nil, netip.Addr{}, errors.New("terminal with no response")
-	}
-	if q.cacheStore(resp, q.cache) {
-		q.logf("terminal cached soa zone=%s\n", zone)
 	}
 	return resp, netip.Addr{}, nil
 }
