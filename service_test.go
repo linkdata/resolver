@@ -20,7 +20,7 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 	r.OrderRoots(t.Context(), time.Millisecond*100)
 	qname := dns.Fqdn("console.aws.amazon.com")
 	qtype := dns.TypeA
-	msg, _, err := r.Resolve(t.Context(), nil, nil, qname, qtype)
+	msg, _, err := r.Resolve(t.Context(), DefaultCache, nil, qname, qtype)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
 	qtype := dns.TypeTXT
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	msg, _, err := r.Resolve(ctx, nil, nil, qname, qtype)
+	msg, _, err := r.Resolve(ctx, DefaultCache, nil, qname, qtype)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 	qtype := dns.TypeNS
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	msg, _, err := r.Resolve(ctx, nil, nil, qname, qtype)
+	msg, _, err := r.Resolve(ctx, DefaultCache, nil, qname, qtype)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,6 +161,7 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 		t.Error(x)
 	}
 	if x := len(msg.Answer); x < 1 {
+		t.Log(len(msg.Ns))
 		t.Fatal(x)
 	}
 	expect := map[string]struct{}{
