@@ -56,12 +56,11 @@ func New() (r *Service) {
 // Resolve performs iterative resolution with QNAME minimization for qname/qtype.
 func (r *Service) Resolve(ctx context.Context, qname string, qtype uint16, logw io.Writer, cache Cacher) (msg *dns.Msg, origin netip.Addr, err error) {
 	qry := query{
-		Service:   r,
-		ctx:       ctx,
-		cache:     cache,
-		writer:    logw,
-		start:     time.Now(),
-		addrCache: make(map[string][]netip.Addr),
+		Service: r,
+		ctx:     ctx,
+		cache:   cache,
+		writer:  logw,
+		start:   time.Now(),
 	}
 	qry.logf(0, "resolve start qname=%s qtype=%s", qname, dns.Type(qtype))
 	msg, origin, err = qry.resolveWithDepth(dns.Fqdn(strings.ToLower(qname)), qtype, 0)

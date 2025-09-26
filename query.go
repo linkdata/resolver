@@ -16,12 +16,11 @@ import (
 
 type query struct {
 	*Service
-	ctx       context.Context
-	cache     Cacher
-	writer    io.Writer
-	start     time.Time
-	queries   int
-	addrCache map[string][]netip.Addr
+	ctx     context.Context
+	cache   Cacher
+	writer  io.Writer
+	start   time.Time
+	queries int
 }
 
 const maxChase = 16     // max CNAME/DNAME chase depth
@@ -276,40 +275,33 @@ func (q *query) handleTerminal(zone string, resp *dns.Msg, depth int) (*dns.Msg,
 func (q *query) resolveNSAddrs(nsOwners []string, depth int) []netip.Addr {
 	var addrs []netip.Addr
 	for _, host := range nsOwners {
-		cached, ok := q.addrCache[host]
-		if ok {
-			q.logf(depth, "resolveNS cached host=%s addrs=%d", host, len(cached))
-			addrs = append(addrs, cached...)
-		} else {
-			var resolved []netip.Addr
-			haveIPv4 := false
-			if msg, _, err := q.resolveWithDepth(dns.Fqdn(strings.ToLower(host)), dns.TypeA, depth+1); err == nil {
+		var resolved []netip.Addr
+		haveIPv4 := false
+		if msg, _, err := q.resolveWithDepth(dns.Fqdn(strings.ToLower(host)), dns.TypeA, depth+1); err == nil {
+			for _, rr := range msg.Answer {
+				if a, ok := rr.(*dns.A); ok {
+					if addr := ipToAddr(a.A); addr.IsValid() {
+						resolved = append(resolved, addr)
+						haveIPv4 = true
+					}
+				}
+			}
+		}
+		if !haveIPv4 {
+			if msg, _, err := q.resolveWithDepth(dns.Fqdn(strings.ToLower(host)), dns.TypeAAAA, depth+1); err == nil {
 				for _, rr := range msg.Answer {
-					if a, ok := rr.(*dns.A); ok {
-						if addr := ipToAddr(a.A); addr.IsValid() {
+					if a, ok := rr.(*dns.AAAA); ok {
+						if addr := ipToAddr(a.AAAA); addr.IsValid() {
 							resolved = append(resolved, addr)
-							haveIPv4 = true
 						}
 					}
 				}
 			}
-			if !haveIPv4 {
-				if msg, _, err := q.resolveWithDepth(dns.Fqdn(strings.ToLower(host)), dns.TypeAAAA, depth+1); err == nil {
-					for _, rr := range msg.Answer {
-						if a, ok := rr.(*dns.AAAA); ok {
-							if addr := ipToAddr(a.AAAA); addr.IsValid() {
-								resolved = append(resolved, addr)
-							}
-						}
-					}
-				}
-			}
-			resolved = dedupAddrs(resolved)
-			if len(resolved) > 0 {
-				q.addrCache[host] = resolved
-				q.logf(depth, "resolveNS resolved host=%s addrs=%d", host, len(resolved))
-				addrs = append(addrs, resolved...)
-			}
+		}
+		resolved = dedupAddrs(resolved)
+		if len(resolved) > 0 {
+			q.logf(depth, "resolveNS resolved host=%s addrs=%d", host, len(resolved))
+			addrs = append(addrs, resolved...)
 		}
 	}
 	q.logf(depth, "resolveNS total addrs=%d", len(addrs))
