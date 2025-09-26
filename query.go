@@ -310,9 +310,8 @@ func (q *query) resolveNSAddrs(nsOwners []string, depth int) []netip.Addr {
 
 func (q *query) logf(depth int, format string, args ...any) {
 	if q.writer != nil {
-		elapsed := time.Since(q.start).Milliseconds()
-		indent := strings.Repeat("  ", depth)
-		_, _ = fmt.Fprintf(q.writer, "[%6dms] %s%s\n", elapsed, indent, fmt.Sprintf(format, args...))
+		_, _ = fmt.Fprintf(q.writer, "\n[%6dms]%*s", time.Since(q.start).Milliseconds(), 1+depth*2, "")
+		_, _ = fmt.Fprintf(q.writer, format, args...)
 	}
 }
 
