@@ -488,15 +488,6 @@ func glueAddresses(m *dns.Msg) []netip.Addr {
 	return dedupAddrs(addrs)
 }
 
-func extractSOA(m *dns.Msg) *dns.SOA {
-	for _, rr := range append(append([]dns.RR{}, m.Ns...), m.Answer...) {
-		if soa, ok := rr.(*dns.SOA); ok {
-			return soa
-		}
-	}
-	return nil
-}
-
 func cnameChainRecords(rrs []dns.RR, owner string) []dns.RR {
 	var out []dns.RR
 	for _, rr := range rrs {
@@ -596,8 +587,7 @@ func prependRecords(msg *dns.Msg, resp *dns.Msg, qname string, gather func([]dns
 	if !haveQuestion {
 		if resp != nil {
 			if len(resp.Question) > 0 {
-				var question dns.Question
-				question = resp.Question[0]
+				question := resp.Question[0]
 				question.Name = qname
 				msg.Question = append(msg.Question, question)
 			}
