@@ -54,9 +54,9 @@ func (q *query) resolve(qname string, qtype uint16) (resp *dns.Msg, srv netip.Ad
 	qname = dns.CanonicalName(qname)
 	if err = q.dive("RESOLVE QUERY %s %q\n", dns.Type(qtype), qname); err == nil {
 		defer func() {
+			q.surface()
 			q.logf("RESOLVE ANSWER %s %q => ", dns.Type(qtype), qname)
 			q.logResponse(time.Time{}, resp, err)
-			q.surface()
 		}()
 		if resp = cacheGet(qname, qtype, q.cache); resp == nil {
 
@@ -113,8 +113,8 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 	if err = q.dive("DELEGATION QUERY %q from %d servers\n", zone, len(parentServers)); err == nil {
 		rcode := -1
 		defer func() {
-			q.logf("DELEGATION ANSWER %q: %s with %d records\n", zone, dns.RcodeToString[rcode], len(nsOwners))
 			q.surface()
+			q.logf("DELEGATION ANSWER %q: %s with %d records\n", zone, dns.RcodeToString[rcode], len(nsOwners))
 		}()
 
 		m := new(dns.Msg)
@@ -206,10 +206,18 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 // queryFinal asks the authoritative (or closest) servers for the target qname/qtype.
 // It also performs CNAME/DNAME chasing, with a loop bound controlled by depth.
 func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr, parentResp *dns.Msg) (last *dns.Msg, lastServer netip.Addr, err error) {
-	if err = q.dive("FINAL QUERY %s %q from %d servers\n", dns.Type(qtype), qname, len(authServers)); err == nil {
+	if err = q.dive("QUERY %s %q from %d servers\n", dns.Type(qtype), qname, len(authServers)); err == nil {
 		defer func() {
-			q.logf("FINAL ANSWER @%s %s %q with %d records\n", lastServer, dns.Type(qtype), qname, len(last.Answer))
 			q.surface()
+			var numrecords int
+			if last != nil {
+				numrecords = len(last.Answer)
+			}
+			var errtxt string
+			if err != nil {
+				errtxt = ": " + err.Error()
+			}
+			q.logf("ANSWER @%s %s %q with %d records%s\n", lastServer, dns.Type(qtype), qname, numrecords, errtxt)
 		}()
 		m := new(dns.Msg)
 		m.SetQuestion(qname, qtype)
@@ -232,53 +240,53 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 				}
 
 				if tgt, ok := cnameTarget(resp, qname); ok {
-					q.logf("FINAL CNAME @%s %s %q => %q\n", svr, dns.Type(qtype), qname, tgt)
+					q.logf("CNAME @%s %s %q => %q\n", svr, dns.Type(qtype), qname, tgt)
 					var msg *dns.Msg
 					var origin netip.Addr
 					msg, origin, err = q.resolve(tgt, qtype)
 					if err == nil {
 						msg = cloneIfCached(msg)
 						prependRecords(msg, resp, qname, cnameChainRecords)
+						last = msg
+						lastServer = origin
 					}
-					last = msg
-					lastServer = origin
 					return
 				}
 
 				if tgt, ok := dnameSynthesize(resp, qname); ok {
-					q.logf("FINAL DNAME @%s %s %q => %q\n", svr, dns.Type(qtype), qname, tgt)
-					msg, origin, err := q.resolve(tgt, qtype)
-					if err != nil {
-						return nil, netip.Addr{}, err
+					q.logf("DNAME @%s %s %q => %q\n", svr, dns.Type(qtype), qname, tgt)
+					var msg *dns.Msg
+					var origin netip.Addr
+					msg, origin, err = q.resolve(tgt, qtype)
+					if err == nil {
+						msg = cloneIfCached(msg)
+						prependRecords(msg, resp, qname, dnameRecords)
+						last = msg
+						lastServer = origin
 					}
-					msg = cloneIfCached(msg)
-					prependRecords(msg, resp, qname, dnameRecords)
-					return msg, origin, nil
+					return
 				}
 
-				q.logf("FINAL soa qname=%s\n", qname)
-				return resp, svr, nil
+				// empty answer
+				return
 
 			case dns.RcodeNameError:
-				q.logf("FINAL NXDOMAIN qname=%s\n", qname)
-				return resp, svr, nil
+				return
 			}
 		}
 
 		if last == nil {
 			if parentResp != nil && qtype == dns.TypeNS {
 				if answers := delegationRecords(parentResp, qname); len(answers) > 0 {
-					q.logf("FINAL parent delegation qname=%s count=%d\n", qname, len(answers))
-					parent := parentResp.Copy()
-					parent.Answer = append([]dns.RR(nil), answers...)
-					return parent, netip.Addr{}, nil
+					q.logf("returning parent delegation for %s with %d records\n", qname, len(answers))
+					last = parentResp.Copy()
+					last.Answer = append([]dns.RR(nil), answers...)
+					return
 				}
 			}
-			q.logf("FINAL no response qname=%s\n", qname)
-			return nil, netip.Addr{}, errors.New("no response from authoritative servers")
+			err = errors.New("no response from authoritative servers")
+			return
 		}
-		q.logf("FINAL result @%s %s %q: %s\n", lastServer, dns.Type(qtype), qname, dns.RcodeToString[last.Rcode])
-		return last, lastServer, nil
 	}
 	return
 }
