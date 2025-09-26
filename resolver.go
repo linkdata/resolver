@@ -89,15 +89,8 @@ func (r *Resolver) usable(protocol string, addr netip.Addr) (yes bool) {
 	return
 }
 
-func (r *Resolver) port() uint16 {
-	if r.DNSPort != 0 {
-		return r.DNSPort
-	}
-	return 53
-}
-
 func (r *Resolver) addrPort(addr netip.Addr) netip.AddrPort {
-	return netip.AddrPortFrom(addr, r.port())
+	return netip.AddrPortFrom(addr, r.DNSPort)
 }
 
 func (r *Resolver) deadline(ctx context.Context) time.Time {
@@ -149,19 +142,17 @@ func extractDelegationNS(m *dns.Msg, zone string) []string {
 	return out
 }
 
-func delegationRecords(m *dns.Msg, zone string) []dns.RR {
-	var out []dns.RR
-	if m == nil {
-		return out
-	}
-	for _, rr := range m.Ns {
-		if ns, ok := rr.(*dns.NS); ok {
-			if strings.EqualFold(ns.Hdr.Name, zone) {
-				out = append(out, rr)
+func delegationRecords(m *dns.Msg, zone string) (out []dns.RR) {
+	if m != nil {
+		for _, rr := range m.Ns {
+			if ns, ok := rr.(*dns.NS); ok {
+				if strings.EqualFold(ns.Hdr.Name, zone) {
+					out = append(out, rr)
+				}
 			}
 		}
 	}
-	return out
+	return
 }
 
 func glueAddresses(m *dns.Msg) []netip.Addr {
@@ -169,11 +160,11 @@ func glueAddresses(m *dns.Msg) []netip.Addr {
 	for _, rr := range m.Extra {
 		switch a := rr.(type) {
 		case *dns.A:
-			if addr, ok := ipToAddr(a.A); ok {
+			if addr := ipToAddr(a.A); addr.IsValid() {
 				addrs = append(addrs, addr)
 			}
 		case *dns.AAAA:
-			if addr, ok := ipToAddr(a.AAAA); ok {
+			if addr := ipToAddr(a.AAAA); addr.IsValid() {
 				addrs = append(addrs, addr)
 			}
 		}
@@ -223,24 +214,10 @@ func dedupAddrs(addrs []netip.Addr) []netip.Addr {
 }
 
 func prependRecords(msg *dns.Msg, resp *dns.Msg, qname string, gather func([]dns.RR, string) []dns.RR) {
-	mergeResponse(msg, resp, gather(resp.Answer, qname))
-	var haveQuestion bool
+	records := gather(resp.Answer, qname)
 	if len(msg.Question) > 0 {
 		msg.Question[0].Name = qname
-		haveQuestion = true
 	}
-	if !haveQuestion {
-		if resp != nil {
-			if len(resp.Question) > 0 {
-				question := resp.Question[0]
-				question.Name = qname
-				msg.Question = append(msg.Question, question)
-			}
-		}
-	}
-}
-
-func mergeResponse(msg *dns.Msg, resp *dns.Msg, records []dns.RR) {
 	if len(records) > 0 {
 		msg.Answer = append(append([]dns.RR(nil), records...), msg.Answer...)
 	}
@@ -269,21 +246,15 @@ func newResponseMsg(qname string, qtype uint16, rcode int, answer, authority, ex
 	return msg
 }
 
-func ipToAddr(ip net.IP) (netip.Addr, bool) {
-	if ip == nil {
-		return netip.Addr{}, false
+func ipToAddr(ip net.IP) (addr netip.Addr) {
+	if ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			addr = netip.AddrFrom4([4]byte(v4))
+		} else if v6 := ip.To16(); v6 != nil {
+			addr = netip.AddrFrom16([16]byte(v6))
+		}
 	}
-	if v4 := ip.To4(); v4 != nil {
-		var arr [4]byte
-		copy(arr[:], v4)
-		return netip.AddrFrom4(arr), true
-	}
-	if v6 := ip.To16(); v6 != nil {
-		var arr [16]byte
-		copy(arr[:], v6)
-		return netip.AddrFrom16(arr), true
-	}
-	return netip.Addr{}, false
+	return
 }
 
 func typeName(qtype uint16) string {

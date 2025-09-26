@@ -278,7 +278,7 @@ func (q *query) resolveNSAddrs(nsOwners []string, depth int) []netip.Addr {
 			if msg, _, err := q.resolveWithDepth(dns.Fqdn(strings.ToLower(host)), dns.TypeA, depth+1); err == nil {
 				for _, rr := range msg.Answer {
 					if a, ok := rr.(*dns.A); ok {
-						if addr, ok := ipToAddr(a.A); ok {
+						if addr := ipToAddr(a.A); addr.IsValid() {
 							resolved = append(resolved, addr)
 							haveIPv4 = true
 						}
@@ -289,7 +289,7 @@ func (q *query) resolveNSAddrs(nsOwners []string, depth int) []netip.Addr {
 				if msg, _, err := q.resolveWithDepth(dns.Fqdn(strings.ToLower(host)), dns.TypeAAAA, depth+1); err == nil {
 					for _, rr := range msg.Answer {
 						if a, ok := rr.(*dns.AAAA); ok {
-							if addr, ok := ipToAddr(a.AAAA); ok {
+							if addr := ipToAddr(a.AAAA); addr.IsValid() {
 								resolved = append(resolved, addr)
 							}
 						}
