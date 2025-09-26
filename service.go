@@ -62,11 +62,7 @@ func (r *Service) Resolve(ctx context.Context, cache Cacher, logw io.Writer, qna
 		writer:  logw,
 		start:   time.Now(),
 	}
-	qry.logf("RESOLVE %s %q", dns.Type(qtype), qname)
 	msg, origin, err = qry.resolve(dns.Fqdn(strings.ToLower(qname)), qtype)
-	if logw != nil {
-		fmt.Fprintln(logw)
-	}
 	return
 }
 
@@ -74,10 +70,6 @@ func (r *Service) usable(protocol string, addr netip.Addr) (yes bool) {
 	yes = strings.HasPrefix(protocol, "tcp") || r.usingUDP()
 	yes = yes && (addr.Is4() || r.usingIPv6())
 	return
-}
-
-func (r *Service) addrPort(addr netip.Addr) netip.AddrPort {
-	return netip.AddrPortFrom(addr, r.DNSPort)
 }
 
 func (r *Service) deadline(ctx context.Context) time.Time {

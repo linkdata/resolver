@@ -57,7 +57,7 @@ func (q *query) resolve(qname string, qtype uint16) (resp *dns.Msg, srv netip.Ad
 				var nsSet []string
 				var nextSrv []netip.Addr
 				if nsSet, nextSrv, resp, err = q.queryForDelegation(zone, servers, qname); err != nil {
-					q.logf("ERROR delegation for %q: %v\n", zone, err)
+					q.logf("DELEGATION ERROR %q: %v\n", zone, err)
 					return
 				}
 
@@ -73,10 +73,10 @@ func (q *query) resolve(qname string, qtype uint16) (resp *dns.Msg, srv netip.Ad
 						if zone == qname {
 							return q.handleTerminal(zone, resp)
 						}
-						q.logf("delegation NXDOMAIN zone=%s continuing", zone)
+						q.logf("DELEGATION NXDOMAIN %q continuing\n", zone)
 						return q.queryFinal(qname, qtype, servers, resp)
 					}
-					q.logf("delegation empty ns zone=%s", zone)
+					q.logf("DELEGATION empty NS %q\n", zone)
 					continue
 				}
 
@@ -104,18 +104,15 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 
 		refusedSeen := false
 		for _, svr := range shuffle(parentServers) {
-			serverStr := q.addrPort(svr).String()
-			q.logf("delegation query zone=%s server=%s", zone, serverStr)
 			resp, err := q.exchange(m, svr)
 			if err != nil {
-				q.logf("delegation error zone=%s server=%s err=%v", zone, serverStr, err)
+				q.logf("DELEGATION ERROR @%s NS %q: %v\n", svr, zone, err)
 				continue
 			}
 			if resp == nil {
 				continue
 			}
 			last = resp
-			q.logf("delegation response zone=%s server=%s rcode=%s", zone, serverStr, dns.RcodeToString[resp.Rcode])
 
 			if resp.Rcode == dns.RcodeRefused || resp.Rcode == dns.RcodeNotImplemented {
 				refusedSeen = true
@@ -123,7 +120,7 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 			}
 			if resp.Rcode == dns.RcodeNameError { // NXDOMAIN at parent ⇒ bubble up
 				if q.cacheStore(resp, q.cache) {
-					q.logf("delegation cached response zone=%s", zone)
+					q.logf("DELEGATION cached response zone=%s\n", zone)
 				}
 				return nil, nil, resp, nil
 			}
@@ -132,7 +129,7 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 			if len(nsOwners) == 0 {
 				if resp.Rcode == dns.RcodeNameError {
 					if q.cacheStore(resp, q.cache) {
-						q.logf("delegation cached response zone=%s", zone)
+						q.logf("DELEGATION cached response zone=%s\n", zone)
 					}
 					return nil, nil, resp, nil
 				}
@@ -148,27 +145,26 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 		}
 		// Fallback to non-QMIN if we observed REFUSED/NOTIMP
 		if refusedSeen {
-			q.logf("delegation fallback zone=%s", zone)
+			q.logf("DELEGATION non-QMIN %q\n", zone)
 			m2 := new(dns.Msg)
 			m2.SetQuestion(fullQname, dns.TypeNS) // ask NS for the full name (non-minimized)
 			m2.RecursionDesired = false
 			setEDNS(m2)
 			for _, svr := range shuffle(parentServers) {
-				serverStr := q.addrPort(svr).String()
-				q.logf("delegation fallback query full=%s server=%s", fullQname, serverStr)
+				q.logf("DELEGATION non-QMIN QUERY @%s NS %q", svr, fullQname)
 				resp, err := q.exchange(m2, svr)
 				if err != nil {
-					q.logf("delegation fallback error full=%s server=%s err=%v", fullQname, serverStr, err)
+					q.logf("DELEGATION non-QMIN ERROR @%s NS %q: %v\n", svr, fullQname, err)
 					continue
 				}
 				if resp == nil {
 					continue
 				}
 				last = resp
-				q.logf("delegation fallback response full=%s server=%s rcode=%s", fullQname, serverStr, dns.RcodeToString[resp.Rcode])
+				q.logf("DELEGATION non-QMIN ANSWER @%s NS %q: %s\n", svr, fullQname, dns.RcodeToString[resp.Rcode])
 				if resp.Rcode == dns.RcodeNameError {
 					if q.cacheStore(resp, q.cache) {
-						q.logf("delegation cached response zone=%s", fullQname)
+						q.logf("DELEGATION non-QMIN ANSWER cached NS %q\n", fullQname)
 					}
 					return nil, nil, resp, nil
 				}
@@ -181,7 +177,7 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 					addrs = q.resolveNSAddrs(nsOwners)
 				}
 				if len(addrs) > 0 {
-					q.logf("delegation returning zone=%s addrs=%d", fullQname, len(addrs))
+					q.logf("DELEGATION non-QMIN RESULT NS %q: %d addrs\n", fullQname, len(addrs))
 					return nsOwners, addrs, resp, nil
 				}
 			}
@@ -189,7 +185,7 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 	}
 
 	if last == nil {
-		return nil, nil, nil, errors.New("no response from parent servers")
+		err = errors.New("no response from parent servers")
 	}
 
 	return
@@ -198,7 +194,7 @@ func (q *query) queryForDelegation(zone string, parentServers []netip.Addr, full
 // queryFinal asks the authoritative (or closest) servers for the target qname/qtype.
 // It also performs CNAME/DNAME chasing, with a loop bound controlled by depth.
 func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr, parentResp *dns.Msg) (*dns.Msg, netip.Addr, error) {
-	q.logf("final query qname=%s qtype=%s servers=%d", qname, dns.Type(qtype), len(authServers))
+	q.logf("FINAL QUERY %s %q from %d servers\n", dns.Type(qtype), qname, len(authServers))
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
 	m.RecursionDesired = false
@@ -216,15 +212,14 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 
 		switch resp.Rcode {
 		case dns.RcodeSuccess:
-			q.logf("final success partial qname=%s server=%s", qname, q.addrPort(svr))
 			if hasRRType(resp.Answer, qtype) {
-				q.logf("final returning answer qname=%s server=%s", qname, q.addrPort(svr))
+				q.logf("FINAL ANSWER @%s %s %q\n", svr, dns.Type(qtype), qname)
 				q.cacheStore(resp, q.cache)
 				return resp, svr, nil
 			}
 
 			if tgt, ok := cnameTarget(resp, qname); ok {
-				q.logf("final cname qname=%s target=%s", qname, tgt)
+				q.logf("FINAL CNAME @%s %s %q => %q\n", svr, dns.Type(qtype), qname, tgt)
 				msg, origin, err := q.resolve(tgt, qtype)
 				if err != nil {
 					return nil, netip.Addr{}, err
@@ -236,7 +231,7 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 			}
 
 			if tgt, ok := dnameSynthesize(resp, qname); ok {
-				q.logf("final dname qname=%s target=%s", qname, tgt)
+				q.logf("FINAL DNAME @%s %s %q => %q\n", svr, dns.Type(qtype), qname, tgt)
 				msg, origin, err := q.resolve(tgt, qtype)
 				if err != nil {
 					return nil, netip.Addr{}, err
@@ -248,13 +243,13 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 			}
 
 			if q.cacheStore(resp, q.cache) {
-				q.logf("final cached soa qname=%s", qname)
+				q.logf("FINAL cached soa qname=%s\n", qname)
 				return resp, svr, nil
 			}
 
 		case dns.RcodeNameError:
 			q.cacheStore(resp, q.cache)
-			q.logf("final NXDOMAIN qname=%s", qname)
+			q.logf("FINAL NXDOMAIN qname=%s\n", qname)
 			return resp, svr, nil
 		}
 	}
@@ -262,17 +257,17 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 	if last == nil {
 		if parentResp != nil && qtype == dns.TypeNS {
 			if answers := delegationRecords(parentResp, qname); len(answers) > 0 {
-				q.logf("final parent delegation qname=%s count=%d", qname, len(answers))
+				q.logf("FINAL parent delegation qname=%s count=%d\n", qname, len(answers))
 				parent := parentResp.Copy()
 				parent.Answer = append([]dns.RR(nil), answers...)
 				q.cacheStore(parent, q.cache)
 				return parent, netip.Addr{}, nil
 			}
 		}
-		q.logf("final no response qname=%s", qname)
+		q.logf("FINAL no response qname=%s\n", qname)
 		return nil, netip.Addr{}, errors.New("no response from authoritative servers")
 	}
-	q.logf("final completed qname=%s server=%s rcode=%s", qname, q.addrPort(lastServer), dns.RcodeToString[last.Rcode])
+	q.logf("FINAL result @%s %s %q: %s\n", lastServer, dns.Type(qtype), qname, dns.RcodeToString[last.Rcode])
 	q.cacheStore(last, q.cache)
 	return last, lastServer, nil
 }
@@ -282,7 +277,7 @@ func (q *query) handleTerminal(zone string, resp *dns.Msg) (*dns.Msg, netip.Addr
 		return nil, netip.Addr{}, errors.New("terminal with no response")
 	}
 	if q.cacheStore(resp, q.cache) {
-		q.logf("terminal cached soa zone=%s", zone)
+		q.logf("terminal cached soa zone=%s\n", zone)
 	}
 	return resp, netip.Addr{}, nil
 }
@@ -316,23 +311,23 @@ func (q *query) resolveNSAddrs(nsOwners []string) []netip.Addr {
 		}
 		resolved = dedupAddrs(resolved)
 		if len(resolved) > 0 {
-			q.logf("resolveNS resolved host=%s addrs=%d", host, len(resolved))
+			q.logf("resolveNS resolved host=%s addrs=%d\n", host, len(resolved))
 			addrs = append(addrs, resolved...)
 		}
 	}
-	q.logf("resolveNS total addrs=%d", len(addrs))
+	q.logf("resolveNS total addrs=%d\n", len(addrs))
 	return dedupAddrs(addrs)
 }
 
 func (q *query) logf(format string, args ...any) {
 	if q.writer != nil {
-		_, _ = fmt.Fprintf(q.writer, "\n[%6dms]%*s", time.Since(q.start).Milliseconds(), 1+q.depth*2, "")
+		_, _ = fmt.Fprintf(q.writer, "[%6dms]%*s", time.Since(q.start).Milliseconds(), q.depth, "")
 		_, _ = fmt.Fprintf(q.writer, format, args...)
 	}
 }
 
 func (q *query) logQuerySend(network string, addr netip.Addr, question dns.Question) {
-	q.logf("SENDING  %s: @%s %s %q", formatProto(network, addr), addr.String(), dns.Type(question.Qtype), question.Name)
+	q.logf("SENDING  %s: @%s %s %q\n", formatProto(network, addr), addr.String(), dns.Type(question.Qtype), question.Name)
 }
 
 func (q *query) logQueryReceive(network string, addr netip.Addr, question dns.Question, resp *dns.Msg, dur time.Duration) {
@@ -341,7 +336,7 @@ func (q *query) logQueryReceive(network string, addr netip.Addr, question dns.Qu
 		if resp.Authoritative {
 			flag = " AUTH"
 		}
-		q.logf("RECEIVED %s: @%s %s %q => %s [%s] (%v, %d bytes%s)",
+		q.logf("RECEIVED %s: @%s %s %q => %s [%s] (%v, %d bytes%s)\n",
 			formatProto(network, addr),
 			addr.String(),
 			dns.Type(question.Qtype),
@@ -407,8 +402,7 @@ func (q *query) exchangeWithNetwork(network string, m *dns.Msg, server netip.Add
 
 func (q *query) dialDNSConn(network string, server netip.Addr) (dnsConn *dns.Conn, err error) {
 	var rawConn net.Conn
-	addrPort := q.addrPort(server)
-	if rawConn, err = q.DialContext(q.ctx, network, addrPort.String()); err == nil {
+	if rawConn, err = q.DialContext(q.ctx, network, netip.AddrPortFrom(server, q.DNSPort).String()); err == nil {
 		dnsConn = &dns.Conn{Conn: rawConn}
 		if strings.HasPrefix(network, "udp") {
 			dnsConn.UDPSize = dns.DefaultMsgSize
