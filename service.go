@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,9 +18,6 @@ import (
 )
 
 //go:generate go run ./cmd/genhints roothints.gen.go
-
-const maxChase = 16    // max CNAME/DNAME chase depth
-const maxQueries = 128 // max queries to make for a single resolve
 
 type Service struct {
 	proxy.ContextDialer
@@ -102,12 +98,6 @@ func setEDNS(m *dns.Msg) {
 	opt := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
 	opt.SetUDPSize(1232)
 	m.Extra = append(m.Extra, opt)
-}
-
-func shuffle[T any](in []T) []T {
-	out := append([]T(nil), in...)
-	sort.Slice(out, func(i, j int) bool { return fmt.Sprint(out[i]) < fmt.Sprint(out[j]) })
-	return out
 }
 
 func hasRRType(rrs []dns.RR, t uint16) bool {

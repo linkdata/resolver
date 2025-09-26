@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +23,9 @@ type query struct {
 	queries   int
 	addrCache map[string][]netip.Addr
 }
+
+const maxChase = 16     // max CNAME/DNAME chase depth
+const maxQueries = 1024 // max queries to make for a single resolve
 
 var ErrCNAMEChainTooDeep = errors.New("cname/dname chain too deep")
 var ErrTooManyQueries = errors.New("to many queries, possible loop")
@@ -405,4 +409,9 @@ func (q *query) dialDNSConn(network string, server netip.Addr, depth int) (dnsCo
 		q.logf(depth, "DIAL FAIL %s: @%s err=%v", formatProto(network, server), server.String(), err)
 	}
 	return
+}
+
+func shuffle(in []netip.Addr) []netip.Addr {
+	sort.Slice(in, func(i, j int) bool { return in[i].Compare(in[j]) < 0 })
+	return in
 }
