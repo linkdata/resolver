@@ -20,7 +20,7 @@ func Test_A_console_aws_amazon_com(t *testing.T) {
 	r.OrderRoots(t.Context(), time.Millisecond*100)
 	qname := dns.Fqdn("console.aws.amazon.com")
 	qtype := dns.TypeA
-	msg, _, err := r.Resolve(t.Context(), qname, qtype, nil, nil)
+	msg, _, err := r.Resolve(t.Context(), nil, nil, qname, qtype)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func Test_TXT_qnamemintest_internet_nl(t *testing.T) {
 	qtype := dns.TypeTXT
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	msg, _, err := r.Resolve(ctx, qname, qtype, nil, nil)
+	msg, _, err := r.Resolve(ctx, nil, nil, qname, qtype)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func Test_NS_bankgirot_nu(t *testing.T) {
 	qtype := dns.TypeNS
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 	defer cancel()
-	msg, _, err := r.Resolve(ctx, qname, qtype, nil, nil)
+	msg, _, err := r.Resolve(ctx, nil, nil, qname, qtype)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestResolverResolveUsesProvidedCache(t *testing.T) {
 	cachedMsg.Zero = true
 	override := &recordingCacher{msg: cachedMsg}
 	originalQuestion := override.msg.Question[0].Name
-	msg, _, err := r.Resolve(t.Context(), qname, qtype, nil, override)
+	msg, _, err := r.Resolve(t.Context(), override, nil, qname, qtype)
 	if err != nil {
 		t.Fatal(err)
 	}

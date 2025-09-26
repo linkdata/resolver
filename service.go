@@ -31,7 +31,7 @@ type Service struct {
 }
 
 func (r *Service) DnsResolve(ctx context.Context, qname string, qtype uint16) (msg *dns.Msg, srv netip.Addr, err error) {
-	return r.Resolve(ctx, qname, qtype, nil, DefaultCache)
+	return r.Resolve(ctx, DefaultCache, nil, qname, qtype)
 }
 
 var _ Resolver = &Service{}
@@ -54,7 +54,7 @@ func New() (r *Service) {
 }
 
 // Resolve performs iterative resolution with QNAME minimization for qname/qtype.
-func (r *Service) Resolve(ctx context.Context, qname string, qtype uint16, logw io.Writer, cache Cacher) (msg *dns.Msg, origin netip.Addr, err error) {
+func (r *Service) Resolve(ctx context.Context, cache Cacher, logw io.Writer, qname string, qtype uint16) (msg *dns.Msg, origin netip.Addr, err error) {
 	qry := query{
 		Service: r,
 		ctx:     ctx,
@@ -62,8 +62,11 @@ func (r *Service) Resolve(ctx context.Context, qname string, qtype uint16, logw 
 		writer:  logw,
 		start:   time.Now(),
 	}
-	qry.logf(0, "resolve start qname=%s qtype=%s", qname, dns.Type(qtype))
-	msg, origin, err = qry.resolveWithDepth(dns.Fqdn(strings.ToLower(qname)), qtype, 0)
+	qry.logf("RESOLVE %s %q", dns.Type(qtype), qname)
+	msg, origin, err = qry.resolve(dns.Fqdn(strings.ToLower(qname)), qtype)
+	if logw != nil {
+		fmt.Fprintln(logw)
+	}
 	return
 }
 
