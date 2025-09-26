@@ -53,18 +53,19 @@ func (q *query) resolve(qname string, qtype uint16) (resp *dns.Msg, srv netip.Ad
 			// Walk down: "." -> "com." -> "example.com."
 			for i := len(labels) - 1; i >= 0; i-- {
 				zone := dns.Fqdn(strings.Join(labels[i:], "."))
-				nsSet, nextSrv, resp, err := q.queryForDelegation(zone, servers, qname)
-				if err != nil {
-					q.logf("delegation error zone=%s err=%v", zone, err)
-					return nil, netip.Addr{}, err
+
+				var nsSet []string
+				var nextSrv []netip.Addr
+				if nsSet, nextSrv, resp, err = q.queryForDelegation(zone, servers, qname); err != nil {
+					q.logf("ERROR delegation for %q: %v\n", zone, err)
+					return
 				}
 
 				if zone == qname {
-					targetServers := nextSrv
-					if len(targetServers) == 0 {
-						targetServers = servers
+					if len(nextSrv) > 0 {
+						servers = nextSrv
 					}
-					return q.queryFinal(qname, qtype, targetServers, resp)
+					break
 				}
 
 				if len(nsSet) == 0 {
@@ -78,9 +79,11 @@ func (q *query) resolve(qname string, qtype uint16) (resp *dns.Msg, srv netip.Ad
 					q.logf("delegation empty ns zone=%s", zone)
 					continue
 				}
+
 				servers = nextSrv
 			}
-			return q.queryFinal(qname, qtype, servers, nil)
+
+			return q.queryFinal(qname, qtype, servers, resp)
 		}
 	}
 	return
