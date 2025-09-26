@@ -225,6 +225,18 @@ func (q *query) queryFinal(qname string, qtype uint16, authServers []netip.Addr,
 					return
 				}
 
+				if qtype == dns.TypeNS {
+					var answers []dns.RR
+					answers = delegationRecords(resp, qname)
+					if len(answers) > 0 {
+						var clone *dns.Msg
+						clone = resp.Copy()
+						clone.Answer = append([]dns.RR(nil), answers...)
+						last = clone
+						return
+					}
+				}
+
 				if tgt, ok := cnameTarget(resp, qname); ok {
 					q.logf("CNAME @%s %s %q => %q\n", svr, dns.Type(qtype), qname, tgt)
 					var msg *dns.Msg
