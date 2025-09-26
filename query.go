@@ -14,7 +14,7 @@ import (
 )
 
 type query struct {
-	*Resolver
+	*Service
 	ctx       context.Context
 	cache     Cacher
 	writer    io.Writer

@@ -12,7 +12,7 @@ type rootRtt struct {
 	rtt  time.Duration
 }
 
-func timeRoot(ctx context.Context, r *Resolver, wg *sync.WaitGroup, rt *rootRtt) {
+func timeRoot(ctx context.Context, r *Service, wg *sync.WaitGroup, rt *rootRtt) {
 	defer wg.Done()
 	const numProbes = 3
 	network := "tcp4"

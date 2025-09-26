@@ -7,21 +7,21 @@ import (
 	"syscall"
 )
 
-func (r *Resolver) usingUDP() (yes bool) {
+func (r *Service) usingUDP() (yes bool) {
 	r.mu.RLock()
 	yes = r.useUDP
 	r.mu.RUnlock()
 	return
 }
 
-func (r *Resolver) usingIPv6() (yes bool) {
+func (r *Service) usingIPv6() (yes bool) {
 	r.mu.RLock()
 	yes = r.useIPv6
 	r.mu.RUnlock()
 	return
 }
 
-func (r *Resolver) maybeDisableIPv6(err error) (disabled bool) {
+func (r *Service) maybeDisableIPv6(err error) (disabled bool) {
 	if err != nil {
 		errstr := err.Error()
 		if errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) ||
@@ -45,7 +45,7 @@ func (r *Resolver) maybeDisableIPv6(err error) (disabled bool) {
 	return
 }
 
-func (r *Resolver) maybeDisableUdp(err error) (disabled bool) {
+func (r *Service) maybeDisableUdp(err error) (disabled bool) {
 	var ne net.Error
 	if errors.As(err, &ne) && !ne.Timeout() {
 		errstr := err.Error()

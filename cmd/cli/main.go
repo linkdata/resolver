@@ -10,7 +10,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func Resolve(ctx context.Context, r *resolver.Resolver, name string, qtype uint16) error {
+func Resolve(ctx context.Context, r *resolver.Service, name string, qtype uint16) error {
 	cache := cache.New()
 	msg, server, err := r.Resolve(ctx, name, qtype, os.Stderr, cache)
 	if err == nil {

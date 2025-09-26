@@ -9,7 +9,7 @@ import (
 )
 
 // OrderRoots sorts the root server list by their current latency and removes those that don't respond within cutoff.
-func (r *Resolver) OrderRoots(ctx context.Context, cutoff time.Duration) {
+func (r *Service) OrderRoots(ctx context.Context, cutoff time.Duration) {
 	if _, ok := ctx.Deadline(); !ok {
 		newctx, cancel := context.WithTimeout(ctx, cutoff*2)
 		defer cancel()
