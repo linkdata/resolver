@@ -309,49 +309,35 @@ func (q *query) resolveNSAddrs(nsOwners []string, depth int) []netip.Addr {
 }
 
 func (q *query) logf(depth int, format string, args ...any) {
-	if q == nil {
-		return
+	if q.writer != nil {
+		elapsed := time.Since(q.start).Milliseconds()
+		indent := strings.Repeat("  ", depth)
+		_, _ = fmt.Fprintf(q.writer, "[%6dms] %s%s\n", elapsed, indent, fmt.Sprintf(format, args...))
 	}
-	if q.writer == nil {
-		return
-	}
-	elapsed := time.Since(q.start).Milliseconds()
-	indent := strings.Repeat("  ", depth)
-	_, _ = fmt.Fprintf(q.writer, "[%6dms] %s%s\n", elapsed, indent, fmt.Sprintf(format, args...))
 }
 
 func (q *query) logQuerySend(depth int, network string, addr netip.Addr, question dns.Question) {
-	if q == nil {
-		return
-	}
-	if q.writer == nil {
-		return
-	}
 	q.logf(depth, "SENDING  %s: @%s %s %q", formatProto(network, addr), addr.String(), typeName(question.Qtype), question.Name)
 }
 
 func (q *query) logQueryReceive(depth int, network string, addr netip.Addr, question dns.Question, resp *dns.Msg, dur time.Duration) {
-	if q == nil {
-		return
+	if resp != nil {
+		var flag string
+		if resp.Authoritative {
+			flag = " AUTH"
+		}
+		q.logf(depth, "RECEIVED %s: @%s %s %q => %s [%s] (%s, %d bytes%s)",
+			formatProto(network, addr),
+			addr.String(),
+			typeName(question.Qtype),
+			question.Name,
+			dns.RcodeToString[resp.Rcode],
+			formatCounts(resp),
+			formatDuration(dur),
+			resp.Len(),
+			flag,
+		)
 	}
-	if q.writer == nil || resp == nil {
-		return
-	}
-	var flag string
-	if resp.Authoritative {
-		flag = " AUTH"
-	}
-	q.logf(depth, "RECEIVED %s: @%s %s %q => %s [%s] (%s, %d bytes%s)",
-		formatProto(network, addr),
-		addr.String(),
-		typeName(question.Qtype),
-		question.Name,
-		dns.RcodeToString[resp.Rcode],
-		formatCounts(resp),
-		formatDuration(dur),
-		resp.Len(),
-		flag,
-	)
 }
 func (q *query) exchange(m *dns.Msg, server netip.Addr, depth int) (resp *dns.Msg, err error) {
 	if resp, err = q.exchangeWithNetwork("udp", m, server, depth+1); err != nil {
